@@ -110,17 +110,15 @@ if sys.platform == "darwin":
         """Extract virtual keycode from a pynput key object."""
         if hasattr(key_obj, "value") and hasattr(key_obj.value, "vk"):
             vk = key_obj.value.vk
-            # pynput sometimes returns None for vk even if the attribute exists
             if vk is not None: return vk
         if hasattr(key_obj, "vk"):
             vk = key_obj.vk
             if vk is not None: return vk
         if isinstance(key_obj, str) and len(key_obj) == 1:
-            # Fallback for characters if pynput didn't parse them as KeyCode.
-            # Convert simple characters to KeyCode first.
-            from pynput.keyboard import KeyCode
-            code = KeyCode.from_char(key_obj)
-            return code.vk
+            # For characters, don't use pynput's KeyCode.from_char which can be flaky
+            # Map common characters directly to virtual keycodes if possible, or return None to use pynput directly
+            # This avoids the "typing 'a' (vk=0)" bug
+            return None
         return None
 
     def _post_cg_event(key_name: str, is_down: bool) -> None:
@@ -138,10 +136,13 @@ if sys.platform == "darwin":
             # Make sure we don't accidentally pass vk 0 (which is 'a') if vk is None or something invalid
             try:
                 vk_int = int(vk)
+                if vk_int == 0 and str(key_obj) != "'a'":
+                    raise ValueError("Refusing to send vk 0 (a) for non-'a' key")
                 event = Quartz.CGEventCreateKeyboardEvent(None, vk_int, is_down)
                 Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
-            except (ValueError, TypeError):
+            except (ValueError, TypeError) as e:
                 # Fallback to pynput if we couldn't resolve a valid int vk
+                logger.debug(f"Falling back to pynput for key '{key_name}': {e}")
                 try:
                     if is_down:
                         _kb.press(key_obj)
