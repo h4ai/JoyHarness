@@ -87,14 +87,12 @@
     "飞书": "飞书",
     "反重力": "Antigravity",
     "VSCode": "Code",
-    "Chrome": "Chrome"
+    "Chrome": "Google Chrome"
   },
   "selected_apps": [
     "Ghostty",
-    "微信",
-    "飞书",
     "Code",
-    "Chrome"
+    "Google Chrome"
   ],
   "profiles": {
     "single_right": {
