@@ -291,14 +291,14 @@ def send_combination(keys: list[str], hold: float = 0.05) -> None:
     logger.debug("combination: %s", "+".join(keys))
 
 
-    def release_all() -> None:
-        """Release every currently held key. Used for cleanup on exit or disconnect."""
-        # On macOS, don't proactively release keys during init to avoid accidental a presses
-        # when _held_keys might be empty but we might be iterating. We only release what we explicitly hold.
-        for key in list(_held_keys):
-            _do_release(key)
-            logger.debug("cleanup released: %s", key)
-        _held_keys.clear()
+def release_all() -> None:
+    """Release every currently held key. Used for cleanup on exit or disconnect."""
+    # On macOS, don't proactively release keys during init to avoid accidental a presses
+    # when _held_keys might be empty but we might be iterating. We only release what we explicitly hold.
+    for key in list(_held_keys):
+        _do_release(key)
+        logger.debug("cleanup released: %s", key)
+    _held_keys.clear()
 
 
 def is_held(key: str) -> bool:
