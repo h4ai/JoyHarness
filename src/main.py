@@ -50,7 +50,7 @@ from .gui import MainWindow
 from .joycon_reader import find_joycon, detect_connection_mode, run_discover_mode, run_polling_loop, wait_for_reconnection
 from .keep_alive import KeepAliveManager
 from .key_mapper import KeyMapper
-from .platform.permission import has_required_permissions, get_permission_warning
+from .os_utils.permission import has_required_permissions, get_permission_warning
 from .tray_icon import create_tray_icon, run_tray
 
 logger = logging.getLogger(__name__)
@@ -240,10 +240,12 @@ def main() -> None:
 
     js = find_joycon(args.joystick)
     if js is None:
-        print("No Joy-Con detected.")
+        print("No Joy-Con detected. Waiting for connection...")
         print(_get_pairing_instructions())
-        pygame.quit()
-        sys.exit(1)
+        js = wait_for_reconnection(args.joystick)
+        if js is None:
+            pygame.quit()
+            sys.exit(1)
 
     print(f"Controller: {js.get_name()}")
     print(f"Buttons: {js.get_numbuttons()}, Axes: {js.get_numaxes()}")

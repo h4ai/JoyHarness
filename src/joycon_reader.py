@@ -271,10 +271,18 @@ def run_polling_loop(
                 pygame.event.pump()
                 # macOS: pygame.event.pump() does NOT raise on disconnect.
                 # Detect via JOYDEVICEREMOVED event or get_count() == 0.
-                for ev in pygame.event.get(pygame.JOYDEVICEREMOVED):
-                    logger.info("JOYDEVICEREMOVED received (instance_id=%s)",
-                                getattr(ev, "instance_id", "?"))
-                    raise pygame.error("Joystick device removed")
+                try:
+                    events = pygame.event.get()
+                    for ev in events:
+                        if ev.type == pygame.JOYDEVICEREMOVED:
+                            logger.info("JOYDEVICEREMOVED received (instance_id=%s)",
+                                        getattr(ev, "instance_id", "?"))
+                            raise pygame.error("Joystick device removed")
+                except SystemError:
+                    # SystemError: <built-in function get> returned a result with an exception set
+                    # can happen after the pygame joystick subsystem is re-initialized
+                    pygame.event.clear()
+
                 if pygame.joystick.get_count() == 0:
                     raise pygame.error("No joysticks connected")
             except pygame.error:
@@ -334,8 +342,13 @@ def run_polling_loop(
             prev_buttons = current_buttons
 
             # --- Stick polling ---
-            raw_x = joystick.get_axis(axis_x) - baseline_x
-            raw_y = joystick.get_axis(axis_y) - baseline_y
+            num_axes = joystick.get_numaxes()
+            if axis_x < num_axes and axis_y < num_axes:
+                raw_x = joystick.get_axis(axis_x) - baseline_x
+                raw_y = joystick.get_axis(axis_y) - baseline_y
+            else:
+                raw_x, raw_y = 0.0, 0.0
+
             filt_x, filt_y = apply_deadzone(raw_x, raw_y, deadzone)
             direction = get_direction(filt_x, filt_y, stick_mode)
 

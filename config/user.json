@@ -29,12 +29,7 @@
         ]
       },
       "R": {
-        "action": "exec",
-        "command": [
-          "open",
-          "-a",
-          "Mission Control"
-        ]
+        "action": "window_switch"
       },
       "ZR": {
         "action": "hold",
@@ -90,9 +85,17 @@
     "Ghostty": "Ghostty",
     "微信": "微信",
     "飞书": "飞书",
-    "反重力": "Antigravity"
+    "反重力": "Antigravity",
+    "VSCode": "Code",
+    "Chrome": "Chrome"
   },
-  "selected_apps": [],
+  "selected_apps": [
+    "Ghostty",
+    "微信",
+    "飞书",
+    "Code",
+    "Chrome"
+  ],
   "profiles": {
     "single_right": {
       "mappings": {
@@ -118,12 +121,7 @@
             ]
           },
           "R": {
-            "action": "exec",
-            "command": [
-              "open",
-              "-a",
-              "Mission Control"
-            ]
+            "action": "window_switch"
           },
           "ZR": {
             "action": "hold",
@@ -262,6 +260,10 @@
           "B": {
             "action": "auto",
             "key": "backspace",
+            "long_keys": [
+              "cmd",
+              "backspace"
+            ],
             "repeat": 100
           },
           "X": {
@@ -276,12 +278,7 @@
             ]
           },
           "R": {
-            "action": "exec",
-            "command": [
-              "open",
-              "-a",
-              "Mission Control"
-            ]
+            "action": "window_switch"
           },
           "ZR": {
             "action": "hold",

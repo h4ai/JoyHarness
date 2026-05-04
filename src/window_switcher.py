@@ -181,26 +181,59 @@ elif sys.platform == "darwin":
         return 0
 
     def _find_windows_quartz(app_names: list[str] | None) -> list[WindowInfo]:
-        """Enumerate on-screen windows via Quartz. WindowInfo.hwnd is the owner PID."""
+        """Hybrid enumeration: NSWorkspace for app names + Quartz for all spaces' windows.
+        WindowInfo.hwnd stores the owner PID.
+        """
         results: list[WindowInfo] = []
-        opts = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements
+
+        # 1. Map PID to localized app names from NSWorkspace
+        apps = NSWorkspace.sharedWorkspace().runningApplications()
+        pid_to_name = {}
+        for app in apps:
+            name = app.localizedName()
+            if not name:
+                continue
+            name_str = str(name)
+            # Handle Chrome mapping properly (sometimes it's "Google Chrome")
+            if name_str == "Google Chrome":
+                name_str = "Chrome"
+
+            if app_names is not None and name_str not in app_names:
+                continue
+            pid_to_name[app.processIdentifier()] = name_str
+
+        logger.debug("pid_to_name mapping: %s", pid_to_name)
+
+        # 2. Get ALL windows via Quartz (including other spaces/desktops)
+        opts = kCGWindowListOptionAll | kCGWindowListExcludeDesktopElements
         windows = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) or []
+
+        # 3. Filter real windows
+        seen = set()
         for w in windows:
-            # Layer 0 = normal app windows; non-zero = menubar, dock, panels, etc.
-            if w.get("kCGWindowLayer", 1) != 0:
+            pid = w.get("kCGWindowOwnerPID")
+            if pid not in pid_to_name:
                 continue
-            owner = w.get("kCGWindowOwnerName", "") or ""
-            title = w.get("kCGWindowName", "") or ""
-            pid = int(w.get("kCGWindowOwnerPID", 0) or 0)
-            if not owner or not pid:
-                continue
-            if not title:
-                # Some apps (e.g. Chrome incognito, certain Electron apps) hide titles
-                # from CGWindowList for privacy. Fall back to the app name.
-                title = owner
-            if app_names is not None and owner not in app_names:
-                continue
-            results.append(WindowInfo(pid, str(title), str(owner)))
+
+            # Real windows are layer 0, opaque, and reasonably sized
+            layer = w.get("kCGWindowLayer", 0)
+            alpha = w.get("kCGWindowAlpha", 0.0)
+            bounds = w.get("kCGWindowBounds", {})
+
+            # bounds might be a CFDictionary, safely get Height. Usually Height is > 20 for real windows.
+            # Using 30px to catch WeChat windows too.
+            h = bounds.get("Height", 0)
+
+            if layer == 0 and alpha > 0.01 and h > 30:
+                app_name = pid_to_name[pid]
+                title = str(w.get("kCGWindowName", "")) or app_name
+                # Avoid exact duplicates if app has multiple identical hidden views
+                sig = (pid, title)
+                if sig not in seen:
+                    seen.add(sig)
+                    results.append(WindowInfo(pid, title, app_name))
+                    logger.debug("Quartz added: pid=%s, app=%s, title=%s, h=%s", pid, app_name, title, h)
+
         return results
 
     def _find_windows_applescript(app_names: list[str] | None) -> list[WindowInfo]:
@@ -273,15 +306,16 @@ elif sys.platform == "darwin":
         results.sort(key=lambda w: (w.app_name, w.title))
         return results
 
-    def _activate_via_pyobjc(pid: int, window_title: str) -> bool:
+    def _activate_via_pyobjc(pid: int, window_title: str, app_name: str) -> bool:
         """Activate app and raise a specific window using AppKit + AX. Returns True on success."""
         try:
             app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
             if app is None:
                 return False
-            # Bring app to front. activateWithOptions_ is deprecated in macOS 14+ but
-            # still functional and is the only way to reliably steal focus across all
-            # supported macOS versions.
+            # In macOS 14/15, activateWithOptions_ alone may fail to switch Desktop spaces.
+            # Using AppleScript to activate the app forces the Space switch and handles Stage Manager reliably.
+            # We then still use AX to raise the specific window within the app.
+            subprocess.run(["osascript", "-e", f'tell application "{app_name}" to activate'], capture_output=True)
             app.activateWithOptions_(_NSAPP_ACTIVATE_IGNORING_OTHER_APPS)
         except Exception:
             logger.debug("NSRunningApplication.activate failed for pid=%d", pid, exc_info=True)
@@ -339,7 +373,7 @@ elif sys.platform == "darwin":
         app_name = hwnd_or_info.app_name
 
         if _PYOBJC_OK and pid > 0:
-            if _activate_via_pyobjc(pid, title):
+            if _activate_via_pyobjc(pid, title, app_name):
                 return
         # Fallback (PyObjC missing, or pid==0 from AppleScript-enumerated WindowInfo)
         _activate_via_applescript(app_name, title)

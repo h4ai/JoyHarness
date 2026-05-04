@@ -106,11 +106,48 @@ if sys.platform == "darwin":
             return lower
         return lower
 
+    def _get_vk(key_obj) -> int | None:
+        """Extract virtual keycode from a pynput key object."""
+        if hasattr(key_obj, "value") and hasattr(key_obj.value, "vk"):
+            return key_obj.value.vk
+        if hasattr(key_obj, "vk"):
+            return key_obj.vk
+        if isinstance(key_obj, str) and len(key_obj) == 1:
+            # Fallback for characters if pynput didn't parse them as KeyCode.
+            # Convert simple characters to KeyCode first.
+            from pynput.keyboard import KeyCode
+            code = KeyCode.from_char(key_obj)
+            return code.vk
+        return None
+
+    def _post_cg_event(key_name: str, is_down: bool) -> None:
+        import Quartz
+        try:
+            key_obj = _resolve_key(key_name)
+        except ValueError:
+            logger.error("Invalid key: '%s'", key_name)
+            return
+
+        vk = _get_vk(key_obj)
+
+        if vk is not None:
+            event = Quartz.CGEventCreateKeyboardEvent(None, vk, is_down)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+        else:
+            # Fallback to pynput if we couldn't resolve a vk
+            try:
+                if is_down:
+                    _kb.press(key_obj)
+                else:
+                    _kb.release(key_obj)
+            except ValueError:
+                logger.error("pynput rejected key: '%s'", key_name)
+
     def _do_press(key_name: str) -> None:
-        _kb.press(_resolve_key(key_name))
+        _post_cg_event(key_name, True)
 
     def _do_release(key_name: str) -> None:
-        _kb.release(_resolve_key(key_name))
+        _post_cg_event(key_name, False)
 
     def _do_type_text(text: str) -> None:
         _kb.type(text)
