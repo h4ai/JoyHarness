@@ -176,12 +176,26 @@ class KeyMapper:
                          btn_name, "+".join(keys), repeat_ms)
 
         elif action == "window_switch":
-            # Record press time and button index, decide short vs long in poll/button_up
+            # Immediately show overlay and cycle to the next window
             self._ws_held = True
             self._ws_button_index = button_index
             self._ws_press_time = time.monotonic()
             self._ws_overlay_active = False
-            logger.debug("window_switch DOWN [%s] (waiting)", btn_name)
+
+            if self._switcher_overlay:
+                windows = find_windows(self._window_cycler.app_names)
+                if windows:
+                    initial = self._find_current_window_index(windows)
+                    self._switcher_overlay.show(windows, initial_index=initial)
+                    self._ws_overlay_active = True
+                    self._ws_last_move = time.monotonic()
+                    # Immediately move to next to select the target window
+                    self._switcher_overlay.move_next()
+                    logger.info("window_switch overlay: %d windows", len(windows))
+                else:
+                    logger.warning("window_switch DOWN [%s] → no windows found", btn_name)
+            else:
+                logger.warning("window_switch DOWN [%s] → overlay not initialized", btn_name)
 
         elif action == "macro":
             self._execute_macro(mapping, btn_name)
@@ -236,7 +250,7 @@ class KeyMapper:
             self._ws_button_index = -1
 
             if self._ws_overlay_active and self._switcher_overlay:
-                # Long press: select the highlighted window and hide overlay
+                # Select the highlighted window and hide overlay
                 selected = self._switcher_overlay.selected
                 self._switcher_overlay.hide()
                 self._ws_overlay_active = False
@@ -244,7 +258,7 @@ class KeyMapper:
                     self._on_overlay_select(selected)
                     logger.info("window_switch UP [%s] → selected: %s", btn_name, selected.title)
             else:
-                # Short press: immediate switch to next
+                # Fallback to quick switch if overlay failed to show
                 target = self._window_cycler.next()
                 if target:
                     logger.info("window_switch UP [%s] → quick: %s", btn_name, target.title)
@@ -313,17 +327,7 @@ class KeyMapper:
                 info["last_time"] = now
                 logger.debug("stick repeat [%s] → %s", k[1], info["key"])
 
-        # Window switch: long press → show overlay and cycle
-        if self._ws_held and not self._ws_overlay_active and self._switcher_overlay:
-            if now - self._ws_press_time >= self._long_threshold:
-                windows = find_windows(self._window_cycler.app_names)
-                if windows:
-                    initial = self._find_current_window_index(windows)
-                    self._switcher_overlay.show(windows, initial_index=initial)
-                    self._ws_overlay_active = True
-                    self._ws_last_move = now
-                    logger.info("window_switch overlay: %d windows", len(windows))
-
+        # Window switch: cycle while held
         if self._ws_held and self._ws_overlay_active and self._switcher_overlay:
             if now - self._ws_last_move >= self._ws_move_interval:
                 self._switcher_overlay.move_next()
