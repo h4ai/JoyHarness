@@ -86,7 +86,7 @@ class KeyMapper:
         self._ws_press_time: float = 0.0
         self._ws_overlay_active: bool = False
         self._ws_last_move: float = 0.0
-        self._ws_move_interval: float = config.get("switch_scroll_interval", 400) / 1000.0
+        self._ws_move_interval: float = config.get("switch_scroll_interval", 600) / 1000.0
 
         logger.info(
             "KeyMapper initialized: %d button mappings, %d direction mappings, "
