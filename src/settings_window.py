@@ -272,27 +272,53 @@ class SettingsWindow(ResizableMixin):
             Messagebox.show_warning("应用名称和 EXE 名称不能为空", title="验证失败", parent=self._win)
             return
 
-        from .window_switcher import find_windows
+        if sys.platform == "darwin":
+            from AppKit import NSWorkspace
+            apps = NSWorkspace.sharedWorkspace().runningApplications()
+            found_app = None
+            for app in apps:
+                name = app.localizedName()
+                if name and str(name) == exe_name:
+                    found_app = app
+                    break
 
-        # Call find_windows to see if we can find any window matching this exe_name
-        windows = find_windows([exe_name])
-
-        if windows:
-            Messagebox.show_info(
-                f"验证成功！\n\n找到了 {len(windows)} 个匹配的应用窗口。\n\n"
-                f"当前识别的进程名: {windows[0].app_name}\n"
-                f"窗口标题示例: {windows[0].title}",
-                title="验证结果",
-                parent=self._win
-            )
+            if found_app:
+                Messagebox.show_info(
+                    f"验证成功！\n\n找到了后台运行的应用进程。\n\n"
+                    f"识别的进程名: {found_app.localizedName()}\n"
+                    f"PID: {found_app.processIdentifier()}",
+                    title="验证结果",
+                    parent=self._win
+                )
+            else:
+                Messagebox.show_warning(
+                    f"验证失败。\n\n未找到任何与 '{exe_name}' 匹配的活动进程。\n\n"
+                    f"请确保：\n1. 应用当前正在运行\n"
+                    f"2. 检查活动监视器中显示的名称与 '{exe_name}' 是否完全一致\n"
+                    f"注意：名称区分大小写，例如 Chrome 应配置为 'Google Chrome'",
+                    title="验证结果",
+                    parent=self._win
+                )
         else:
-            Messagebox.show_warning(
-                f"验证失败。\n\n未找到任何与 '{exe_name}' 匹配的活动窗口。\n\n"
-                f"请确保：\n1. 应用当前正在运行\n2. 至少有一个非最小化的应用窗口\n"
-                f"3. 检查活动监视器中显示的名称与 '{exe_name}' 是否完全一致",
-                title="验证结果",
-                parent=self._win
-            )
+            # Fallback for Windows using find_windows logic
+            from .window_switcher import find_windows
+            windows = find_windows([exe_name])
+
+            if windows:
+                Messagebox.show_info(
+                    f"验证成功！\n\n找到了匹配的应用。\n\n"
+                    f"当前识别的进程名: {windows[0].app_name}",
+                    title="验证结果",
+                    parent=self._win
+                )
+            else:
+                Messagebox.show_warning(
+                    f"验证失败。\n\n未找到与 '{exe_name}' 匹配的应用。\n\n"
+                    f"请确保：\n1. 应用当前正在运行\n"
+                    f"2. 任务管理器中的名称与配置一致",
+                    title="验证结果",
+                    parent=self._win
+                )
 
     def _collect_apps(self) -> tuple[dict[str, str], list[str]]:
         apps = {}
