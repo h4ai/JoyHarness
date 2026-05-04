@@ -253,11 +253,46 @@ class SettingsWindow(ResizableMixin):
         exe_entry = ttk.Entry(row, textvariable=exe_var, width=18, bootstyle=SECONDARY)
         exe_entry.pack(side=LEFT)
 
+        verify_btn = ttk.Button(row, text="验证", bootstyle=INFO, width=4)
+        verify_btn.pack(side=LEFT, padx=(4, 0))
+        verify_btn.configure(command=lambda n=name_var, e=exe_var: self._verify_app(n.get(), e.get()))
+
         del_btn = ttk.Label(row, text=" ✕ ", font=("", 10), bootstyle=DANGER, cursor="hand2")
         del_btn.pack(side=LEFT, padx=(4, 0))
         del_btn.bind("<Button-1>", lambda e, r=row: r.destroy())
 
         self._app_rows.append({"frame": row, "name_var": name_var, "exe_var": exe_var})
+
+    def _verify_app(self, display_name: str, exe_name: str) -> None:
+        """Check if the given app exists/is running."""
+        display_name = display_name.strip()
+        exe_name = exe_name.strip()
+
+        if not display_name or not exe_name:
+            Messagebox.show_warning("应用名称和 EXE 名称不能为空", title="验证失败", parent=self._win)
+            return
+
+        from .window_switcher import find_windows
+
+        # Call find_windows to see if we can find any window matching this exe_name
+        windows = find_windows([exe_name])
+
+        if windows:
+            Messagebox.show_info(
+                f"验证成功！\n\n找到了 {len(windows)} 个匹配的应用窗口。\n\n"
+                f"当前识别的进程名: {windows[0].app_name}\n"
+                f"窗口标题示例: {windows[0].title}",
+                title="验证结果",
+                parent=self._win
+            )
+        else:
+            Messagebox.show_warning(
+                f"验证失败。\n\n未找到任何与 '{exe_name}' 匹配的活动窗口。\n\n"
+                f"请确保：\n1. 应用当前正在运行\n2. 至少有一个非最小化的应用窗口\n"
+                f"3. 检查活动监视器中显示的名称与 '{exe_name}' 是否完全一致",
+                title="验证结果",
+                parent=self._win
+            )
 
     def _collect_apps(self) -> tuple[dict[str, str], list[str]]:
         apps = {}
