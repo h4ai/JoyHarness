@@ -200,7 +200,9 @@ elif sys.platform == "darwin":
 
             if app_names is not None and name_str not in app_names:
                 continue
-            pid_to_name[app.processIdentifier()] = name_str
+            # Only consider regular apps (activation policy 0 = NSApplicationActivationPolicyRegular)
+            if app.activationPolicy() == 0:
+                pid_to_name[app.processIdentifier()] = name_str
 
         logger.debug("pid_to_name mapping: %s", pid_to_name)
 
@@ -210,6 +212,10 @@ elif sys.platform == "darwin":
 
         # 3. Filter real windows
         seen = set()
+
+        # Keep track of apps we found windows for via Quartz
+        apps_with_windows = set()
+
         for w in windows:
             pid = w.get("kCGWindowOwnerPID")
             if pid not in pid_to_name:
@@ -233,8 +239,17 @@ elif sys.platform == "darwin":
                 sig = (pid, title)
                 if sig not in seen:
                     seen.add(sig)
+                    apps_with_windows.add(pid)
                     results.append(WindowInfo(pid, title, app_name))
                     logger.debug("Quartz added: pid=%s, app=%s, title=%s, h=%s, layer=%s", pid, app_name, title, h, layer)
+
+        # 4. Fallback for apps on other spaces/desktops that Quartz didn't find windows for
+        # On macOS, Quartz sometimes doesn't report windows for apps on completely different spaces
+        for pid, app_name in pid_to_name.items():
+            if pid not in apps_with_windows:
+                # Add a synthetic window entry for this running app
+                results.append(WindowInfo(pid, app_name, app_name))
+                logger.debug("Fallback added running app: pid=%s, app=%s", pid, app_name)
 
         return results
 
