@@ -329,18 +329,22 @@ elif sys.platform == "darwin":
             app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
             if app is None:
                 return False
-            # In macOS 14/15, activateWithOptions_ alone may fail to switch Desktop spaces.
-            # Using AppleScript to activate the app forces the Space switch and handles Stage Manager reliably.
-            # We then still use AX to raise the specific window within the app.
-            subprocess.run(["osascript", "-e", f'tell application "{app_name}" to activate'], capture_output=True)
-            app.activateWithOptions_(_NSAPP_ACTIVATE_IGNORING_OTHER_APPS)
+            # AppleScript is the most robust way to force a Space switch on macOS 14+
+            # especially for apps that are in fullscreen mode or on different spaces
+            script = f'''
+            tell application "{app_name}"
+                activate
+            end tell
+            '''
+            subprocess.run(["osascript", "-e", script], capture_output=True)
+
+            # Additional push via AppKit
+            app.activateWithOptions_(3)  # NSApplicationActivateIgnoringOtherApps | NSApplicationActivateAllWindows
         except Exception:
             logger.debug("NSRunningApplication.activate failed for pid=%d", pid, exc_info=True)
             return False
 
         # Try to raise the specific window via Accessibility API.
-        # If AX permission isn't granted, this silently no-ops — the app is still
-        # activated, which is the most important step.
         try:
             ax_app = AXUIElementCreateApplication(pid)
             err, windows = AXUIElementCopyAttributeValue(ax_app, _AX_WINDOWS, None)
