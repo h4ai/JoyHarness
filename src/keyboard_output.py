@@ -145,8 +145,11 @@ if sys.platform == "darwin":
             # Make sure we don't accidentally pass vk 0 (which is 'a') if vk is None or something invalid
             try:
                 vk_int = int(vk)
-                if vk_int == 0 and str(key_obj) != "'a'":
-                    raise ValueError("Refusing to send vk 0 (a) for non-'a' key")
+                # The only valid case where we want to send vk=0 is if the key actually resolves to the letter 'a'.
+                # A common cause of the rogue 'a' bug is that a special key (like media keys, volume, etc)
+                # doesn't map correctly, yields vk=0, and then triggers 'a'.
+                if vk_int == 0 and str(key_obj).replace("'", "") != "a":
+                    raise ValueError(f"Refusing to send vk 0 (a) for non-'a' key: {key_name} -> {key_obj}")
                 event = Quartz.CGEventCreateKeyboardEvent(None, vk_int, is_down)
                 Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
             except (ValueError, TypeError) as e:
@@ -288,12 +291,14 @@ def send_combination(keys: list[str], hold: float = 0.05) -> None:
     logger.debug("combination: %s", "+".join(keys))
 
 
-def release_all() -> None:
-    """Release every currently held key. Used for cleanup on exit or disconnect."""
-    for key in list(_held_keys):
-        _do_release(key)
-        logger.debug("cleanup released: %s", key)
-    _held_keys.clear()
+    def release_all() -> None:
+        """Release every currently held key. Used for cleanup on exit or disconnect."""
+        # On macOS, don't proactively release keys during init to avoid accidental a presses
+        # when _held_keys might be empty but we might be iterating. We only release what we explicitly hold.
+        for key in list(_held_keys):
+            _do_release(key)
+            logger.debug("cleanup released: %s", key)
+        _held_keys.clear()
 
 
 def is_held(key: str) -> bool:
