@@ -224,7 +224,9 @@ elif sys.platform == "darwin":
             # Using 30px to catch WeChat windows too.
             h = bounds.get("Height", 0)
 
-            if layer == 0 and alpha > 0.01 and h > 30:
+            # Relax the layer check for macOS (sometimes main windows are layer > 0)
+            # but keep the basic checks to filter out hidden/1x1px windows.
+            if alpha > 0.01 and h > 20:
                 app_name = pid_to_name[pid]
                 title = str(w.get("kCGWindowName", "")) or app_name
                 # Avoid exact duplicates if app has multiple identical hidden views
@@ -232,7 +234,7 @@ elif sys.platform == "darwin":
                 if sig not in seen:
                     seen.add(sig)
                     results.append(WindowInfo(pid, title, app_name))
-                    logger.debug("Quartz added: pid=%s, app=%s, title=%s, h=%s", pid, app_name, title, h)
+                    logger.debug("Quartz added: pid=%s, app=%s, title=%s, h=%s, layer=%s", pid, app_name, title, h, layer)
 
         return results
 
