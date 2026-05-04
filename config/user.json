@@ -85,12 +85,16 @@
     "Ghostty": "Ghostty",
     "微信": "微信",
     "飞书": "飞书",
+    "Claude": "Claude",
     "反重力": "Antigravity",
     "VSCode": "Code",
     "Chrome": "Google Chrome"
   },
   "selected_apps": [
     "Ghostty",
+    "微信",
+    "飞书",
+    "Claude",
     "Code",
     "Google Chrome"
   ],
