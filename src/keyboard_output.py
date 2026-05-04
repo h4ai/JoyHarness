@@ -114,6 +114,15 @@ if sys.platform == "darwin":
         if hasattr(key_obj, "vk"):
             vk = key_obj.vk
             if vk is not None: return vk
+
+        # Hardcode vk for common special keys to bypass pynput issues on macOS
+        key_str = str(key_obj)
+        if key_str == "Key.enter": return 36
+        if key_str == "Key.esc": return 53
+        if key_str == "Key.backspace": return 51
+        if key_str == "Key.tab": return 48
+        if key_str == "Key.space": return 49
+
         if isinstance(key_obj, str) and len(key_obj) == 1:
             # For characters, don't use pynput's KeyCode.from_char which can be flaky
             # Map common characters directly to virtual keycodes if possible, or return None to use pynput directly
@@ -142,7 +151,7 @@ if sys.platform == "darwin":
                 Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
             except (ValueError, TypeError) as e:
                 # Fallback to pynput if we couldn't resolve a valid int vk
-                logger.debug(f"Falling back to pynput for key '{key_name}': {e}")
+                logger.debug("Falling back to pynput for key '%s': %s", key_name, e)
                 try:
                     if is_down:
                         _kb.press(key_obj)
@@ -152,6 +161,7 @@ if sys.platform == "darwin":
                     logger.error("pynput rejected key: '%s'", key_name)
         else:
             # Fallback to pynput if we couldn't resolve a vk
+            logger.debug("Falling back to pynput for key '%s' (vk is None)", key_name)
             try:
                 if is_down:
                     _kb.press(key_obj)
