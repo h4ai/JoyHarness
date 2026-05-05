@@ -130,6 +130,30 @@ if sys.platform == "darwin":
             return None
         return None
 
+    def _safe_pynput(key_obj, key_name: str, is_down: bool) -> None:
+        """Send a key via pynput, but refuse if it would resolve to vk=0
+        for anything that isn't actually the letter 'a' — pynput on macOS
+        synthesizes vk=0 CGEvents for keys with no proper mapping (e.g. media
+        keys), which the system interprets as the 'a' character.
+        """
+        # Probe vk that pynput would use, and block the rogue 'a' case.
+        probe_vk = None
+        if hasattr(key_obj, "value") and hasattr(key_obj.value, "vk"):
+            probe_vk = key_obj.value.vk
+        elif hasattr(key_obj, "vk"):
+            probe_vk = key_obj.vk
+        if probe_vk == 0 and str(key_obj).replace("'", "") != "a":
+            logger.warning("Refusing pynput fallback for '%s' (would emit vk=0 → 'a')",
+                           key_name)
+            return
+        try:
+            if is_down:
+                _kb.press(key_obj)
+            else:
+                _kb.release(key_obj)
+        except ValueError:
+            logger.error("pynput rejected key: '%s'", key_name)
+
     def _post_cg_event(key_name: str, is_down: bool) -> None:
         import Quartz
         try:
@@ -155,23 +179,11 @@ if sys.platform == "darwin":
             except (ValueError, TypeError) as e:
                 # Fallback to pynput if we couldn't resolve a valid int vk
                 logger.debug("Falling back to pynput for key '%s': %s", key_name, e)
-                try:
-                    if is_down:
-                        _kb.press(key_obj)
-                    else:
-                        _kb.release(key_obj)
-                except ValueError:
-                    logger.error("pynput rejected key: '%s'", key_name)
+                _safe_pynput(key_obj, key_name, is_down)
         else:
             # Fallback to pynput if we couldn't resolve a vk
             logger.debug("Falling back to pynput for key '%s' (vk is None)", key_name)
-            try:
-                if is_down:
-                    _kb.press(key_obj)
-                else:
-                    _kb.release(key_obj)
-            except ValueError:
-                logger.error("pynput rejected key: '%s'", key_name)
+            _safe_pynput(key_obj, key_name, is_down)
 
     def _do_press(key_name: str) -> None:
         _post_cg_event(key_name, True)

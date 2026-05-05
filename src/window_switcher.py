@@ -128,6 +128,7 @@ elif sys.platform == "darwin":
         from Quartz import (  # type: ignore
             CGWindowListCopyWindowInfo,
             kCGWindowListOptionOnScreenOnly,
+            kCGWindowListOptionAll,
             kCGWindowListExcludeDesktopElements,
             kCGNullWindowID,
         )

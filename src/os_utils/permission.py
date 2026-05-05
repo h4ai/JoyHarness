@@ -47,15 +47,20 @@ def _check_windows_admin() -> bool:
 
 
 def _check_macos_accessibility() -> bool:
-    """Check macOS Accessibility permission by attempting a pynput operation."""
+    """Check macOS Accessibility permission without injecting any keystroke.
+
+    Earlier versions used `osascript -e 'tell application "System Events" to
+    key code 0'` — but `key code 0` IS the letter 'a', so the check itself
+    typed an 'a' into whatever window was active at startup.
+
+    Instead we use AXIsProcessTrustedWithOptions from ApplicationServices,
+    which inspects permission state without sending any input event.
+    """
     try:
-        import subprocess
-        result = subprocess.run(
-            ["osascript", "-e", 'tell application "System Events" to key code 0'],
-            capture_output=True,
-            timeout=3,
-        )
-        return result.returncode == 0
+        from ApplicationServices import AXIsProcessTrustedWithOptions  # type: ignore
+        # Pass None (no prompt) so this is purely a query.
+        return bool(AXIsProcessTrustedWithOptions(None))
     except Exception:
-        logger.debug("Accessibility check failed, assuming not granted")
+        logger.debug("Accessibility check failed, assuming not granted",
+                     exc_info=True)
         return False
