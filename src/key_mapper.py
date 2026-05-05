@@ -279,8 +279,17 @@ class KeyMapper:
             if now - press_time >= self._long_threshold:
                 btn_name = _button_label(btn_idx, self._mode)
                 mapping = self._button_mappings.get(btn_idx, {})
+                long_keys = mapping.get("long_keys")
                 repeat_ms = mapping.get("repeat", 0)
-                if repeat_ms > 0:
+                if long_keys:
+                    # Long-press combination: fire once, no hold, no repeat.
+                    # Used e.g. for cmd+backspace ("delete word/line") on long press
+                    # of a button that taps backspace on short press.
+                    keyboard_output.send_combination(list(long_keys))
+                    logger.debug("auto LONG-COMBO [%s] → %s (after %.0fms)",
+                                 btn_name, "+".join(long_keys),
+                                 (now - press_time) * 1000)
+                elif repeat_ms > 0:
                     # Re-tap mode: tap once now, then poll() keeps tapping at interval.
                     # Used for keys like backspace where the OS doesn't auto-repeat
                     # synthetic CGEvent keyDowns held by pynput.
