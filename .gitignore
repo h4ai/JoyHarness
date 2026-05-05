@@ -23,5 +23,10 @@ config/user.json
 .vscode/
 .idea/
 .DS_Store
+
+# Local configuration files (sensitive information)
 .claude/settings.local.json
+.claude/*.local.*
+.env.local
+*.local.json
 
