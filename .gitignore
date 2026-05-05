@@ -5,12 +5,14 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+tests/
 *.egg
 
 # Virtual environments
 .venv/
 venv/
 env/
+venv_new/
 
 # Runtime files
 calibration_result.json
@@ -18,7 +20,8 @@ nsjc.log
 config/user.json
 
 # IDE / tooling
-.claude/
 .vscode/
 .idea/
 .DS_Store
+.claude/settings.local.json
+
