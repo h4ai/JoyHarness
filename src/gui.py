@@ -30,6 +30,19 @@ logger = logging.getLogger(__name__)
 _UI_FONT = "Helvetica" if sys.platform == "darwin" else "Microsoft YaHei UI"
 
 
+def _icon_path(name: str):
+    """Resolve an icon file path in both dev and PyInstaller bundle.
+
+    Returns a pathlib.Path or None if not found.
+    """
+    from pathlib import Path
+    if hasattr(sys, "_MEIPASS"):
+        candidate = Path(sys._MEIPASS) / "assets" / "icons" / name
+    else:
+        candidate = Path(__file__).resolve().parent.parent / "assets" / "icons" / name
+    return candidate if candidate.exists() else None
+
+
 class MainWindow(ResizableMixin):
     """Main application window for the Joy-Con mapper."""
 
@@ -61,6 +74,9 @@ class MainWindow(ResizableMixin):
         )
         self._root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._root.minsize(400, 347)
+
+        # Window title-bar / Dock icon
+        self._set_window_icon(self._root)
 
         # On Windows, remove native title bar for a clean dark look.
         # On macOS, keep the native title bar for better system integration
@@ -212,6 +228,29 @@ class MainWindow(ResizableMixin):
         y = (self._root.winfo_screenheight() - h) // 2
         self._root.geometry(f"+{x}+{y}")
 
+    def _set_window_icon(self, win) -> None:
+        """Apply the JoyVoice icon to a Tk window's title bar / Dock entry.
+
+        Resolves the icon from assets/icons whether running from source or
+        from inside the PyInstaller bundle.
+        """
+        try:
+            from PIL import Image, ImageTk
+            png_path = _icon_path("AppIcon-1024.png")
+            if png_path is None:
+                return
+            img = Image.open(png_path).convert("RGBA")
+            # Tk wants a reasonable size; 256 is a good compromise
+            img = img.resize((256, 256), Image.LANCZOS)
+            photo = ImageTk.PhotoImage(img, master=win)
+            win.iconphoto(True, photo)
+            # Hold a reference so it isn't garbage collected
+            if not hasattr(self, "_icon_refs"):
+                self._icon_refs = []
+            self._icon_refs.append(photo)
+        except Exception:
+            logger.exception("Failed to set window icon")
+
     def _start_drag(self, event) -> None:
         self._drag_x = event.x
         self._drag_y = event.y
@@ -342,7 +381,22 @@ class MainWindow(ResizableMixin):
         )
 
     def _on_close(self) -> None:
-        """Handle window close — exit the program."""
+        """Handle window close.
+
+        On macOS the app lives in the menu bar, so closing the main window
+        only hides it — the user reopens it from the menu bar or quits
+        explicitly via the 退出 menu item. On other platforms, closing the
+        window still terminates the process.
+        """
+        if sys.platform == "darwin":
+            logger.info("Main window closed → hiding (menu bar app keeps running)")
+            try:
+                save_config(self._config)
+            except Exception:
+                logger.exception("save_config on close failed")
+            self._root.withdraw()
+            return
+
         logger.info("Main window closed, stopping...")
         save_config(self._config)
         self._stop_event.set()

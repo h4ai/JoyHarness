@@ -11,6 +11,15 @@ actions based on the loaded configuration. Handles these action types:
 - exec: launch a shell command (useful for macOS system actions like
   triggering Mission Control via `open -a "Mission Control"`, where
   pynput-synthesized hotkeys can't reach the system event handler)
+
+Internal button-key convention:
+- single_right / single_left mode: an int (the pygame button index).
+- dual mode: a (side, idx) tuple where side ∈ {"L", "R"}.
+The polling layer (joycon_reader.run_polling_loop) is responsible for
+constructing the right key shape per mode and passing it to
+button_down/button_up. All internal dicts in this class are keyed by
+this opaque value, so no per-mode branching is needed in the dispatch
+or release paths.
 """
 
 from __future__ import annotations
@@ -41,8 +50,9 @@ class KeyMapper:
         mappings = config.get("mappings", {})
         long_threshold = config.get("long_press_threshold", LONG_PRESS_THRESHOLD)
 
-        # Build button index → mapping dict
-        self._button_mappings: dict[int, dict] = {}
+        # Build button key → mapping dict. Key is int (single) or (side, idx) (dual);
+        # see module docstring. The shape is whatever _button_indices[name] returns.
+        self._button_mappings: dict = {}
         for btn_name, mapping in mappings.get("buttons", {}).items():
             if btn_name in self._button_indices:
                 self._button_mappings[self._button_indices[btn_name]] = mapping
@@ -52,24 +62,24 @@ class KeyMapper:
         for direction, mapping in mappings.get("stick_directions", {}).items():
             self._direction_mappings[direction] = mapping
 
-        # Track currently active modifier/hold keys: btn_idx → key_name
-        self._active_holds: dict[int, str] = {}
+        # Track currently active modifier/hold keys: btn_key → key_name
+        self._active_holds: dict = {}
 
-        # Track active sequence holds: btn_idx → list of keys
-        self._active_sequences: dict[int, list[str]] = {}
+        # Track active sequence holds: btn_key → list of keys
+        self._active_sequences: dict = {}
 
-        # Track sequence repeat: btn_idx → {keys, interval, last_time}
-        self._sequence_repeat: dict[int, dict] = {}
+        # Track sequence repeat: btn_key → {keys, interval, last_time}
+        self._sequence_repeat: dict = {}
 
         # Track stick direction repeat: ("stick", direction) → {key, interval, last_time}
         self._stick_repeat: dict[tuple, dict] = {}
 
-        # Track auto-action pending state: btn_idx → (key, press_time)
-        self._auto_pending: dict[int, tuple[str, float]] = {}
+        # Track auto-action pending state: btn_key → (key, press_time)
+        self._auto_pending: dict = {}
 
-        # Track button auto-action re-tap repeat: btn_idx → {key, interval, last_time}
+        # Track button auto-action re-tap repeat: btn_key → {key, interval, last_time}
         # Populated when an auto-action with `repeat` field reaches long-press threshold.
-        self._button_repeat: dict[int, dict] = {}
+        self._button_repeat: dict = {}
 
         self._long_threshold = long_threshold
 
@@ -82,7 +92,8 @@ class KeyMapper:
         # Window switch overlay and state (tkinter root set later via set_tk_root)
         self._switcher_overlay: SwitcherOverlay | None = None
         self._ws_held: bool = False
-        self._ws_button_index: int = -1  # tracks which button triggered window_switch
+        # tracks which btn_key triggered window_switch (None when inactive)
+        self._ws_button_key = None
         self._ws_press_time: float = 0.0
         self._ws_overlay_active: bool = False
         self._ws_last_move: float = 0.0
@@ -122,19 +133,24 @@ class KeyMapper:
                     return i
         return 0
 
-    def button_down(self, button_index: int) -> None:
-        """Handle a button press event."""
-        mapping = self._button_mappings.get(button_index)
+    def button_down(self, btn_key) -> None:
+        """Handle a button press event.
+
+        Args:
+            btn_key: int (single modes) or (side, idx) tuple (dual mode).
+                The polling layer is responsible for constructing the right shape.
+        """
+        mapping = self._button_mappings.get(btn_key)
         if mapping is None:
             return
 
         action = mapping["action"]
-        btn_name = _button_label(button_index, self._mode)
+        btn_name = self._label(btn_key)
 
         if action == "hold":
             key = mapping["key"]
             keyboard_output.press(key)
-            self._active_holds[button_index] = key
+            self._active_holds[btn_key] = key
             logger.debug("hold DOWN [%s] → %s", btn_name, key)
 
         elif action == "tap":
@@ -143,10 +159,16 @@ class KeyMapper:
             logger.debug("tap [%s] → %s", btn_name, key)
 
         elif action == "auto":
-            # Don't act yet — wait to see if it's short or long press
-            key = mapping["key"]
-            self._auto_pending[button_index] = (key, time.monotonic())
-            logger.debug("auto DOWN [%s] → %s (waiting)", btn_name, key)
+            # Don't act yet — wait to see if it's short or long press.
+            # short_keys (list) takes precedence over key (single string).
+            # Stored payload: ("combo", [k1,k2,...]) or ("single", "k").
+            short_keys = mapping.get("short_keys")
+            if short_keys:
+                payload = ("combo", list(short_keys))
+            else:
+                payload = ("single", mapping["key"])
+            self._auto_pending[btn_key] = (payload, time.monotonic())
+            logger.debug("auto DOWN [%s] → %s (waiting)", btn_name, payload)
 
         elif action == "combination":
             keys = mapping["keys"]
@@ -163,11 +185,11 @@ class KeyMapper:
             # Tap subsequent keys once
             for key in keys[1:]:
                 keyboard_output.tap(key)
-            self._active_holds[button_index] = "__sequence__"
-            self._active_sequences[button_index] = keys
+            self._active_holds[btn_key] = "__sequence__"
+            self._active_sequences[btn_key] = keys
             # If repeat enabled, set up repeat for keys[1:]
             if repeat_ms > 0 and len(keys) > 1:
-                self._sequence_repeat[button_index] = {
+                self._sequence_repeat[btn_key] = {
                     "keys": keys[1:],
                     "interval": repeat_ms / 1000.0,
                     "last_time": time.monotonic(),
@@ -178,7 +200,7 @@ class KeyMapper:
         elif action == "window_switch":
             # Immediately show overlay and cycle to the next window
             self._ws_held = True
-            self._ws_button_index = button_index
+            self._ws_button_key = btn_key
             self._ws_press_time = time.monotonic()
             self._ws_overlay_active = False
 
@@ -203,51 +225,65 @@ class KeyMapper:
         elif action == "exec":
             self._execute_exec(mapping, btn_name)
 
-    def button_up(self, button_index: int) -> None:
+    def button_up(self, btn_key) -> None:
         """Handle a button release event."""
-        btn_name = _button_label(button_index, self._mode)
+        btn_name = self._label(btn_key)
 
         # Handle sequence release (reverse order)
-        if button_index in self._active_sequences:
-            self._sequence_repeat.pop(button_index, None)
-            keys = self._active_sequences.pop(button_index)
+        if btn_key in self._active_sequences:
+            self._sequence_repeat.pop(btn_key, None)
+            keys = self._active_sequences.pop(btn_key)
             for key in reversed(keys):
                 keyboard_output.release(key)
+            # _active_holds was given the sentinel "__sequence__" — clear it too
+            self._active_holds.pop(btn_key, None)
             logger.debug("sequence UP [%s] → %s released", btn_name, "+".join(keys))
             return
 
         # Handle hold release
-        if button_index in self._active_holds:
-            key = self._active_holds.pop(button_index)
+        if btn_key in self._active_holds:
+            key = self._active_holds.pop(btn_key)
             keyboard_output.release(key)
             logger.debug("hold UP [%s] → %s released", btn_name, key)
             return
 
         # Handle auto release
-        if button_index in self._auto_pending:
-            key, press_time = self._auto_pending.pop(button_index)
+        if btn_key in self._auto_pending:
+            payload, press_time = self._auto_pending.pop(btn_key)
             elapsed = time.monotonic() - press_time
+            kind, val = payload
 
             if elapsed < self._long_threshold:
-                # Short press → tap
-                keyboard_output.tap(key)
-                logger.debug("auto UP [%s] → tap %s (%.0fms)", btn_name, key, elapsed * 1000)
+                # Short press
+                if kind == "combo":
+                    keyboard_output.send_combination(val)
+                    logger.debug("auto UP [%s] → combo %s (%.0fms)", btn_name, "+".join(val), elapsed * 1000)
+                else:
+                    keyboard_output.tap(val)
+                    logger.debug("auto UP [%s] → tap %s (%.0fms)", btn_name, val, elapsed * 1000)
             else:
-                # Long press was already activated in poll — just release
-                keyboard_output.release(key)
-                if button_index in self._active_holds:
-                    self._active_holds.pop(button_index, None)
-                logger.debug("auto UP [%s] → release %s (%.0fms)", btn_name, key, elapsed * 1000)
+                # Long press was already activated in poll. The held key (if any) is
+                # tracked in _active_holds — release whatever was actually held there.
+                # That covers both:
+                #  - short=single + no long_keys → poll() held `val` (single short key)
+                #  - short=anything + long_keys=[single] → poll() held long_keys[0]
+                # combos (multi-key long_keys, or short combo fallback) leave nothing held.
+                held = self._active_holds.pop(btn_key, None)
+                if held and held != "__sequence__":
+                    keyboard_output.release(held)
+                    logger.debug("auto UP [%s] → release %s (%.0fms)", btn_name, held, elapsed * 1000)
+                else:
+                    logger.debug("auto UP [%s] → long done, nothing held (%.0fms)", btn_name, elapsed * 1000)
 
         # Handle auto re-tap repeat release (no key release needed — each was a tap)
-        if button_index in self._button_repeat:
-            info = self._button_repeat.pop(button_index)
+        if btn_key in self._button_repeat:
+            info = self._button_repeat.pop(btn_key)
             logger.debug("auto UP [%s] → stop repeat %s", btn_name, info["key"])
 
         # Handle window_switch release — only if this is the button that started it
-        if self._ws_held and button_index == self._ws_button_index:
+        if self._ws_held and btn_key == self._ws_button_key:
             self._ws_held = False
-            self._ws_button_index = -1
+            self._ws_button_key = None
 
             if self._ws_overlay_active and self._switcher_overlay:
                 # Select the highlighted window and hide overlay
@@ -274,44 +310,56 @@ class KeyMapper:
         now = time.monotonic()
 
         # Button auto-actions
-        for btn_idx in list(self._auto_pending.keys()):
-            key, press_time = self._auto_pending[btn_idx]
+        for btn_key in list(self._auto_pending.keys()):
+            payload, press_time = self._auto_pending[btn_key]
             if now - press_time >= self._long_threshold:
-                btn_name = _button_label(btn_idx, self._mode)
-                mapping = self._button_mappings.get(btn_idx, {})
+                btn_name = self._label(btn_key)
+                mapping = self._button_mappings.get(btn_key, {})
                 long_keys = mapping.get("long_keys")
                 repeat_ms = mapping.get("repeat", 0)
+                kind, val = payload
                 if long_keys:
-                    # Long-press combination: fire once, no hold, no repeat.
-                    # Used e.g. for cmd+backspace ("delete word/line") on long press
-                    # of a button that taps backspace on short press.
-                    keyboard_output.send_combination(list(long_keys))
-                    logger.debug("auto LONG-COMBO [%s] → %s (after %.0fms)",
-                                 btn_name, "+".join(long_keys),
-                                 (now - press_time) * 1000)
-                elif repeat_ms > 0:
+                    # Long-press behavior depends on shape:
+                    # - single key (e.g. ["alt_r"]) → press AND HOLD until button_up
+                    #   (used for push-to-talk style: long-press ZR → hold Option for voice input)
+                    # - multi-key combo (e.g. ["cmd","backspace"]) → fire as one-shot chord
+                    if len(long_keys) == 1:
+                        hold_key = long_keys[0]
+                        keyboard_output.press(hold_key)
+                        self._active_holds[btn_key] = hold_key
+                        logger.debug("auto LONG-HOLD [%s] → %s (after %.0fms)",
+                                     btn_name, hold_key, (now - press_time) * 1000)
+                    else:
+                        keyboard_output.send_combination(list(long_keys))
+                        logger.debug("auto LONG-COMBO [%s] → %s (after %.0fms)",
+                                     btn_name, "+".join(long_keys),
+                                     (now - press_time) * 1000)
+                elif kind == "single" and repeat_ms > 0:
                     # Re-tap mode: tap once now, then poll() keeps tapping at interval.
-                    # Used for keys like backspace where the OS doesn't auto-repeat
-                    # synthetic CGEvent keyDowns held by pynput.
-                    keyboard_output.tap(key)
-                    self._button_repeat[btn_idx] = {
-                        "key": key,
+                    keyboard_output.tap(val)
+                    self._button_repeat[btn_key] = {
+                        "key": val,
                         "interval": repeat_ms / 1000.0,
                         "last_time": now,
                     }
                     logger.debug("auto REPEAT [%s] → %s every %dms (after %.0fms)",
-                                 btn_name, key, repeat_ms, (now - press_time) * 1000)
-                else:
+                                 btn_name, val, repeat_ms, (now - press_time) * 1000)
+                elif kind == "single":
                     # Hold mode: press and hold until button_up.
-                    keyboard_output.press(key)
-                    self._active_holds[btn_idx] = key
+                    keyboard_output.press(val)
+                    self._active_holds[btn_key] = val
                     logger.debug("auto HOLD [%s] → %s (after %.0fms)",
-                                 btn_name, key, (now - press_time) * 1000)
-                del self._auto_pending[btn_idx]
+                                 btn_name, val, (now - press_time) * 1000)
+                else:
+                    # short_keys is a combo and no long_keys configured: fire short combo as fallback long behavior
+                    keyboard_output.send_combination(list(val))
+                    logger.debug("auto LONG (combo fallback) [%s] → %s (after %.0fms)",
+                                 btn_name, "+".join(val), (now - press_time) * 1000)
+                del self._auto_pending[btn_key]
 
         # Button auto re-tap repeat (e.g. backspace held = delete many chars)
-        for btn_idx in list(self._button_repeat.keys()):
-            info = self._button_repeat[btn_idx]
+        for btn_key in list(self._button_repeat.keys()):
+            info = self._button_repeat[btn_key]
             if now - info["last_time"] >= info["interval"]:
                 keyboard_output.tap(info["key"])
                 info["last_time"] = now
@@ -319,13 +367,13 @@ class KeyMapper:
         # Stick auto-actions: already activated immediately in stick_direction(), no pending check needed
 
         # Sequence repeat (e.g., Alt held + Tab every N ms)
-        for btn_idx in list(self._sequence_repeat.keys()):
-            info = self._sequence_repeat[btn_idx]
+        for btn_key in list(self._sequence_repeat.keys()):
+            info = self._sequence_repeat[btn_key]
             if now - info["last_time"] >= info["interval"]:
                 for key in info["keys"]:
                     keyboard_output.tap(key)
                 info["last_time"] = now
-                btn_name = _button_label(btn_idx, self._mode)
+                btn_name = self._label(btn_key)
                 logger.debug("sequence repeat [%s] → %s", btn_name, "+".join(info["keys"]))
 
         # Stick direction repeat (e.g., arrow key every 100ms while held)
@@ -421,7 +469,7 @@ class KeyMapper:
         """Release all currently held keys and cancel pending auto actions."""
         # Hide overlay if active
         self._ws_held = False
-        self._ws_button_index = -1
+        self._ws_button_key = None
         self._ws_overlay_active = False
         if self._switcher_overlay:
             self._switcher_overlay.hide()
@@ -433,8 +481,10 @@ class KeyMapper:
         self._sequence_repeat.clear()
         self._stick_repeat.clear()
         self._button_repeat.clear()
-        # Release holds
+        # Release holds (skip the "__sequence__" sentinel — already released above)
         for key in self._active_holds.values():
+            if key == "__sequence__":
+                continue
             keyboard_output.release(key)
         self._active_holds.clear()
         self._auto_pending.clear()
@@ -514,7 +564,12 @@ class KeyMapper:
         except Exception:
             logger.exception("exec [%s] failed: %s", btn_name, cmd)
 
-
-def _button_label(button_index: int, mode: str = "single_right") -> str:
-    """Get human-readable name for a button index."""
-    return get_button_names(mode).get(button_index, f"BTN_{button_index}")
+    def _label(self, btn_key) -> str:
+        """Get human-readable name for a btn_key (int or (side, idx) tuple)."""
+        name = self._button_names.get(btn_key)
+        if name is not None:
+            return name
+        if isinstance(btn_key, tuple):
+            side, idx = btn_key
+            return f"{side}_BTN_{idx}"
+        return f"BTN_{btn_key}"

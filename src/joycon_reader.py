@@ -1,7 +1,17 @@
-"""pygame-based Joy-Con R detection and polling loop.
+"""pygame-based Joy-Con detection and polling loop.
 
 Handles controller discovery, button state polling, axis reading,
 disconnection detection, and automatic reconnection.
+
+Single-mode (single_left / single_right): one pygame Joystick, button events
+dispatched as plain int indices.
+
+Dual mode: two SEPARATE pygame Joystick devices on macOS (because
+SDL_JOYSTICK_HIDAPI_COMBINE_JOY_CONS=0 is forced in main.py so BatteryReader
+can read each side over HID). The polling loop holds both devices, tags every
+button press with side ("L" or "R"), and dispatches (side, idx) tuples to
+KeyMapper. The user picks which physical stick drives the direction mappings
+via mappings.stick_source ("left" or "right").
 """
 
 from __future__ import annotations
@@ -28,24 +38,80 @@ logger = logging.getLogger(__name__)
 RECONNECT_INTERVAL = 2.0
 
 
-def find_joycon(joystick_index: int | None = None) -> pygame.joystick.Joystick | None:
-    """Find and return a Joy-Con joystick instance.
+def _classify_side(name: str) -> str | None:
+    """Classify a joystick name as a Joy-Con side.
 
-    Args:
-        joystick_index: Specific device index to use. None for auto-detection.
+    Returns "L", "R", or None if not a recognizable Joy-Con. We mirror the
+    same rough heuristic as battery_reader._find_joycons: the SDL device
+    name typically contains "(L)" / "Left" or "(R)" / "Right".
+    """
+    n = name.lower()
+    if not any(kw in n for kw in ("joy-con", "joy con", "switch", "pro controller")):
+        return None
+    # Check explicit side markers. Order matters — check both before single-letter.
+    if "(l)" in n or "left" in n:
+        return "L"
+    if "(r)" in n or "right" in n:
+        return "R"
+    # Fall back to standalone "l"/"r" tokens (e.g. "Joy-Con L")
+    tokens = n.replace("(", " ").replace(")", " ").split()
+    if "l" in tokens:
+        return "L"
+    if "r" in tokens:
+        return "R"
+    return None
 
-    Returns:
-        pygame Joystick instance, or None if not found.
+
+def find_joycons() -> list[tuple[str, pygame.joystick.Joystick]]:
+    """Find all connected Joy-Cons and return them tagged by side.
+
+    Returns a list of (side, joystick) tuples where side ∈ {"L", "R"}.
+    For unidentifiable single devices, defaults the side to "R" (preserves
+    legacy behavior where unknown devices were treated as right Joy-Con).
     """
     pygame.joystick.init()
     count = pygame.joystick.get_count()
 
     if count == 0:
-        return None
+        return []
 
     logger.info("Found %d joystick(s)", count)
+    found: list[tuple[str, pygame.joystick.Joystick]] = []
+    seen_sides: set[str] = set()
 
+    for i in range(count):
+        js = pygame.joystick.Joystick(i)
+        name = js.get_name()
+        side = _classify_side(name)
+        logger.info("  [%d] %s (buttons=%d, axes=%d) → side=%s",
+                    i, name, js.get_numbuttons(), js.get_numaxes(), side)
+        if side is None:
+            continue
+        # Avoid duplicating the same side (combined-device case where a single
+        # SDL device spuriously matches both keywords)
+        if side in seen_sides:
+            continue
+        seen_sides.add(side)
+        found.append((side, js))
+
+    # Fallback: if nothing classified but exactly one device present, treat as R.
+    if not found and count == 1:
+        js = pygame.joystick.Joystick(0)
+        logger.info("Single unidentified joystick, defaulting side=R: %s", js.get_name())
+        found.append(("R", js))
+
+    return found
+
+
+def find_joycon(joystick_index: int | None = None) -> pygame.joystick.Joystick | None:
+    """Find and return a single Joy-Con joystick instance.
+
+    Kept for backward compatibility with discover mode and reconnection in
+    single-mode flows. Returns the first detected Joy-Con (R preferred).
+    """
     if joystick_index is not None:
+        pygame.joystick.init()
+        count = pygame.joystick.get_count()
         if 0 <= joystick_index < count:
             js = pygame.joystick.Joystick(joystick_index)
             logger.info("Using joystick #%d: %s", joystick_index, js.get_name())
@@ -53,140 +119,104 @@ def find_joycon(joystick_index: int | None = None) -> pygame.joystick.Joystick |
         logger.error("Joystick index %d out of range (0-%d)", joystick_index, count - 1)
         return None
 
-    # Auto-detect: look for Joy-Con in device names (accept both L and R)
-    for i in range(count):
-        js = pygame.joystick.Joystick(i)
-        name = js.get_name().lower()
-        logger.info("  [%d] %s (buttons=%d, axes=%d)",
-                     i, js.get_name(), js.get_numbuttons(), js.get_numaxes())
-
-        if "joy-con" in name or "joy con" in name or "switch" in name or "pro controller" in name:
-            logger.info("Auto-selected joystick [%d]: %s", i, js.get_name())
+    found = find_joycons()
+    if not found:
+        return None
+    # Prefer R when both present (legacy behavior)
+    for side, js in found:
+        if side == "R":
             return js
-
-    # Fallback: if only one joystick, use it
-    if count == 1:
-        js = pygame.joystick.Joystick(0)
-        logger.info("Single joystick found, using: %s", js.get_name())
-        return js
-
-    logger.warning("No Joy-Con detected among %d joysticks", count)
-    return None
+    return found[0][1]
 
 
 def detect_connection_mode() -> str:
     """Detect the Joy-Con connection mode from connected joysticks.
 
-    Scans all connected pygame joysticks and determines whether only a
-    left Joy-Con, only a right Joy-Con, or both (dual/combined) are connected.
-
     Returns:
         One of "single_left", "single_right", or "dual".
     """
-    count = pygame.joystick.get_count()
-
-    if count == 0:
+    found = find_joycons()
+    if not found:
         return "single_right"
 
-    has_left = False
-    has_right = False
-
-    for i in range(count):
-        js = pygame.joystick.Joystick(i)
-        name = js.get_name().lower()
-
-        # Skip non-Joy-Con devices
-        if not any(kw in name for kw in ("joy-con", "joy con", "switch", "pro controller")):
-            continue
-
-        # Check for combined device (contains both "l" and "r")
-        if "l" in name and "r" in name:
-            logger.debug("Detected combined Joy-Con device: %s", js.get_name())
-            return "dual"
-
-        if "l" in name:
-            has_left = True
-        elif "r" in name:
-            has_right = True
-        else:
-            # Unidentified side — check number of buttons as heuristic
-            # Combined devices typically have 20+ buttons
-            if js.get_numbuttons() >= 18:
-                logger.debug("Detected combined Joy-Con device (high button count): %s", js.get_name())
-                return "dual"
-            # Default to right if single device
-            has_right = True
-
-    if has_left and has_right:
-        logger.debug("Detected both L and R Joy-Cons (separate devices)")
+    sides = {side for side, _ in found}
+    if "L" in sides and "R" in sides:
         return "dual"
-    elif has_left:
-        logger.debug("Detected single left Joy-Con")
+    if "L" in sides:
         return "single_left"
-    else:
-        logger.debug("Detected single right Joy-Con")
-        return "single_right"
+    return "single_right"
 
 
 def run_discover_mode(joystick_index: int | None = None) -> None:
     """Run discovery mode: print raw button/axis values for calibration.
 
     Press Ctrl+C to exit. Use this to determine correct button indices
-    for your specific controller/driver combination.
+    for your specific controller/driver combination. In dual mode this
+    polls both Joy-Cons and prefixes each event with the side.
     """
     pygame.init()
-    js = find_joycon(joystick_index)
 
-    if js is None:
-        print("No joystick found. Make sure your Joy-Con R is connected via Bluetooth.")
-        print("Tip: Windows Settings → Bluetooth → Add device → hold the small pairing")
-        print("     button on the Joy-Con rail for 3 seconds until lights flash.")
-        pygame.quit()
-        return
-
-    # Use mode-aware button names for discover output
     mode = detect_connection_mode()
-    btn_names = BUTTON_NAMES_BY_MODE.get(mode, BUTTON_NAMES)
+
+    if mode == "dual":
+        joycons = find_joycons()
+        if not joycons:
+            print("No joystick found.")
+            pygame.quit()
+            return
+    else:
+        js = find_joycon(joystick_index)
+        if js is None:
+            print("No joystick found. Make sure your Joy-Con is connected via Bluetooth.")
+            print("Tip: Windows Settings → Bluetooth → Add device → hold the small pairing")
+            print("     button on the Joy-Con rail for 3 seconds until lights flash.")
+            pygame.quit()
+            return
+        # Determine side for naming consistency with single mode
+        side = _classify_side(js.get_name()) or ("L" if mode == "single_left" else "R")
+        joycons = [(side, js)]
+
+    btn_names_dual = BUTTON_NAMES_BY_MODE["dual"]  # {(side, idx): name}
 
     print(f"\n=== Discovery Mode ===")
-    print(f"Controller: {js.get_name()}")
-    print(f"GUID: {js.get_guid()}")
-    print(f"Buttons: {js.get_numbuttons()}")
-    print(f"Axes: {js.get_numaxes()}")
     print(f"Connection mode: {mode}")
+    for side, js in joycons:
+        print(f"  [side={side}] {js.get_name()} GUID={js.get_guid()} "
+              f"buttons={js.get_numbuttons()} axes={js.get_numaxes()}")
     print(f"\nPress buttons and move sticks to see their indices.")
     print(f"Press Ctrl+C to exit.\n")
 
     clock = pygame.time.Clock()
-    prev_buttons: set[int] = set()
+    prev_buttons: dict[str, set[int]] = {side: set() for side, _ in joycons}
 
     try:
         while True:
             pygame.event.pump()
 
-            current_buttons: set[int] = set()
-            for i in range(js.get_numbuttons()):
-                if js.get_button(i):
-                    current_buttons.add(i)
+            for side, js in joycons:
+                current: set[int] = set()
+                for i in range(js.get_numbuttons()):
+                    if js.get_button(i):
+                        current.add(i)
 
-            pressed = current_buttons - prev_buttons
-            released = prev_buttons - current_buttons
+                pressed = current - prev_buttons[side]
+                released = prev_buttons[side] - current
 
-            for i in sorted(pressed):
-                name = btn_names.get(i, "???")
-                print(f"  BTN {i:2d} ({name:8s}) PRESSED")
+                for i in sorted(pressed):
+                    name = btn_names_dual.get((side, i), "???")
+                    print(f"  [{side}] BTN {i:2d} ({name:8s}) PRESSED")
 
-            for i in sorted(released):
-                name = btn_names.get(i, "???")
-                print(f"  BTN {i:2d} ({name:8s}) released")
+                for i in sorted(released):
+                    name = btn_names_dual.get((side, i), "???")
+                    print(f"  [{side}] BTN {i:2d} ({name:8s}) released")
 
-            prev_buttons = current_buttons
+                prev_buttons[side] = current
 
-            # Axis state (only print if changed significantly)
-            for i in range(js.get_numaxes()):
-                val = js.get_axis(i)
-                if abs(val) > 0.1:
-                    print(f"  AXIS {i}: {val:+.3f}", end="\r")
+                # Axis state (only print if changed significantly)
+                for i in range(js.get_numaxes()):
+                    val = js.get_axis(i)
+                    if abs(val) > 0.1:
+                        print(f"  [{side}] AXIS {i}: {val:+.3f}", end="\r")
 
             clock.tick(60)
 
@@ -225,8 +255,33 @@ def _calibrate_baseline(
     return (total_x / samples, total_y / samples)
 
 
+def _select_stick_joystick(
+    joycons: list[tuple[str, pygame.joystick.Joystick]],
+    config: dict,
+) -> pygame.joystick.Joystick | None:
+    """Pick which joystick supplies stick axes based on mode and config.
+
+    In single modes there is only one joystick and stick_source is ignored.
+    In dual mode mappings.stick_source ("left" | "right") chooses the side;
+    falls back to the right joystick if the requested side isn't present.
+    """
+    if not joycons:
+        return None
+    if len(joycons) == 1:
+        return joycons[0][1]
+    desired = (
+        config.get("mappings", {}).get("stick_source", "right").lower()
+    )
+    target_side = "L" if desired.startswith("l") else "R"
+    for side, js in joycons:
+        if side == target_side:
+            return js
+    # Fallback: any joystick
+    return joycons[0][1]
+
+
 def run_polling_loop(
-    joystick: pygame.joystick.Joystick,
+    joysticks: list[tuple[str, pygame.joystick.Joystick]] | pygame.joystick.Joystick,
     key_mapper: KeyMapper,
     config: dict,
     stop_event: threading.Event | None = None,
@@ -235,12 +290,22 @@ def run_polling_loop(
     """Main polling loop: read controller state and dispatch to key_mapper.
 
     Args:
-        joystick: Initialized pygame Joystick instance.
+        joysticks: Either a list of (side, Joystick) tuples (preferred), or
+            a single pygame.joystick.Joystick for legacy callers (treated as
+            side="R" or "L" depending on detect_connection_mode()).
         key_mapper: KeyMapper instance for action dispatch.
         config: Complete configuration dict.
         stop_event: Threading event to signal loop exit. None = run until Ctrl+C.
     """
     from .config_loader import get_profile
+
+    # Normalize input to list[(side, js)]
+    if isinstance(joysticks, list):
+        joycons = list(joysticks)
+    else:
+        # Legacy single-joystick caller — classify by name
+        side = _classify_side(joysticks.get_name()) or "R"
+        joycons = [(side, joysticks)]
 
     deadzone = config.get("deadzone", 0.2)
     poll_interval = max(config.get("poll_interval", 0.01), 0.001)
@@ -249,7 +314,7 @@ def run_polling_loop(
     axis_y = config.get("axis_y", AXIS_RSTICK_Y)
 
     clock = pygame.time.Clock()
-    prev_buttons: set[int] = set()
+    prev_buttons: dict[str, set[int]] = {side: set() for side, _ in joycons}
     prev_direction: str | None = None
     center_count: int = 0
 
@@ -258,12 +323,24 @@ def run_polling_loop(
     mode_check_interval = 5.0  # seconds
     last_mode_check = time.monotonic()
 
-    logger.info("Polling started (deadzone=%.2f, interval=%.0fms, mode=%s)",
-                deadzone, poll_interval * 1000, stick_mode)
+    logger.info("Polling started (deadzone=%.2f, interval=%.0fms, mode=%s, joycons=%d)",
+                deadzone, poll_interval * 1000, stick_mode, len(joycons))
+    for side, js in joycons:
+        logger.info("  [%s] %s", side, js.get_name())
 
-    # Calibrate baseline: average resting position over 10 samples
-    baseline_x, baseline_y = _calibrate_baseline(joystick, axis_x, axis_y)
-    logger.info("Stick baseline: x=%.4f, y=%.4f", baseline_x, baseline_y)
+    # Pick which joystick drives the stick directions and calibrate it
+    stick_js = _select_stick_joystick(joycons, config)
+    baseline_x, baseline_y = (0.0, 0.0)
+    if stick_js is not None:
+        baseline_x, baseline_y = _calibrate_baseline(stick_js, axis_x, axis_y)
+        logger.info("Stick baseline: x=%.4f, y=%.4f (from %s)",
+                    baseline_x, baseline_y, stick_js.get_name())
+
+    def _make_btn_key(side: str, idx: int):
+        """Construct the btn_key shape KeyMapper expects for the active mode."""
+        if current_mode == "dual":
+            return (side, idx)
+        return idx
 
     try:
         while not (stop_event and stop_event.is_set()):
@@ -283,6 +360,9 @@ def run_polling_loop(
                     # can happen after the pygame joystick subsystem is re-initialized
                     pygame.event.clear()
 
+                # In dual mode all joysticks must remain connected
+                if pygame.joystick.get_count() < len(joycons):
+                    raise pygame.error("Joystick device count dropped")
                 if pygame.joystick.get_count() == 0:
                     raise pygame.error("No joysticks connected")
             except pygame.error:
@@ -292,20 +372,16 @@ def run_polling_loop(
                 from . import keyboard_output
                 keyboard_output.release_all()
 
-                js = wait_for_reconnection()
-                if js is None or (stop_event and stop_event.is_set()):
+                joycons = wait_for_reconnection()
+                if not joycons or (stop_event and stop_event.is_set()):
                     break
 
-                # Re-initialize with the new joystick
-                joystick = js
-                prev_buttons = set()
+                # Re-initialize state with new joystick set
+                prev_buttons = {side: set() for side, _ in joycons}
                 prev_direction = None
                 center_count = 0
-                baseline_x, baseline_y = _calibrate_baseline(joystick, axis_x, axis_y)
-                logger.info("Reconnected: %s, baseline=(%.4f, %.4f)",
-                            js.get_name(), baseline_x, baseline_y)
 
-                # Re-detect connection mode after reconnection
+                # Re-detect connection mode (may have changed L↔R↔dual)
                 try:
                     detected_mode = detect_connection_mode()
                     if detected_mode != current_mode:
@@ -322,30 +398,41 @@ def run_polling_loop(
                 except Exception:
                     logger.debug("Mode check after reconnect failed", exc_info=True)
 
+                # Re-calibrate stick after profile may have switched stick_source
+                stick_js = _select_stick_joystick(joycons, config)
+                if stick_js is not None:
+                    baseline_x, baseline_y = _calibrate_baseline(stick_js, axis_x, axis_y)
+                    logger.info("Reconnected, baseline=(%.4f, %.4f) from %s",
+                                baseline_x, baseline_y, stick_js.get_name())
+
                 continue
 
-            # --- Button polling ---
-            current_buttons: set[int] = set()
-            for i in range(joystick.get_numbuttons()):
-                if joystick.get_button(i):
-                    current_buttons.add(i)
+            # --- Button polling (per side) ---
+            for side, js in joycons:
+                current: set[int] = set()
+                for i in range(js.get_numbuttons()):
+                    if js.get_button(i):
+                        current.add(i)
 
-            pressed = current_buttons - prev_buttons
-            released = prev_buttons - current_buttons
+                pressed = current - prev_buttons[side]
+                released = prev_buttons[side] - current
 
-            for btn_idx in sorted(pressed):
-                key_mapper.button_down(btn_idx)
+                for btn_idx in sorted(pressed):
+                    key_mapper.button_down(_make_btn_key(side, btn_idx))
 
-            for btn_idx in sorted(released):
-                key_mapper.button_up(btn_idx)
+                for btn_idx in sorted(released):
+                    key_mapper.button_up(_make_btn_key(side, btn_idx))
 
-            prev_buttons = current_buttons
+                prev_buttons[side] = current
 
-            # --- Stick polling ---
-            num_axes = joystick.get_numaxes()
-            if axis_x < num_axes and axis_y < num_axes:
-                raw_x = joystick.get_axis(axis_x) - baseline_x
-                raw_y = joystick.get_axis(axis_y) - baseline_y
+            # --- Stick polling (single source per the active profile) ---
+            if stick_js is not None:
+                num_axes = stick_js.get_numaxes()
+                if axis_x < num_axes and axis_y < num_axes:
+                    raw_x = stick_js.get_axis(axis_x) - baseline_x
+                    raw_y = stick_js.get_axis(axis_y) - baseline_y
+                else:
+                    raw_x, raw_y = 0.0, 0.0
             else:
                 raw_x, raw_y = 0.0, 0.0
 
@@ -379,6 +466,12 @@ def run_polling_loop(
                         current_mode = detected_mode
                         if on_mode_change:
                             on_mode_change(detected_mode)
+                        # Re-resolve joycon list and stick source after mode change
+                        joycons = find_joycons() or joycons
+                        prev_buttons = {side: set() for side, _ in joycons}
+                        stick_js = _select_stick_joystick(joycons, config)
+                        if stick_js is not None:
+                            baseline_x, baseline_y = _calibrate_baseline(stick_js, axis_x, axis_y)
                 except Exception:
                     logger.debug("Connection mode check failed", exc_info=True)
 
@@ -395,10 +488,11 @@ def run_polling_loop(
         keyboard_output.release_all()
 
 
-def wait_for_reconnection(joystick_index: int | None = None) -> pygame.joystick.Joystick | None:
+def wait_for_reconnection(joystick_index: int | None = None) -> list[tuple[str, pygame.joystick.Joystick]]:
     """Scan for Joy-Con reconnection every RECONNECT_INTERVAL seconds.
 
-    Returns a new Joystick instance when found, or None if interrupted.
+    Returns a list of (side, joystick) tuples when at least one is found,
+    or an empty list if interrupted.
     """
     logger.info("Controller disconnected. Waiting for reconnection...")
 
@@ -408,9 +502,11 @@ def wait_for_reconnection(joystick_index: int | None = None) -> pygame.joystick.
             # Re-init joystick subsystem to scan for new devices
             pygame.joystick.quit()
             pygame.joystick.init()
-            js = find_joycon(joystick_index)
-            if js is not None:
-                logger.info("Controller reconnected: %s", js.get_name())
-                return js
+            joycons = find_joycons()
+            if joycons:
+                logger.info("Controller(s) reconnected: %d Joy-Con(s)", len(joycons))
+                for side, js in joycons:
+                    logger.info("  [%s] %s", side, js.get_name())
+                return joycons
     except KeyboardInterrupt:
-        return None
+        return []

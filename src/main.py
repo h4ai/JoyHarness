@@ -18,6 +18,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 
 # Ensure the project root is on sys.path so that `src` is importable
@@ -47,10 +48,22 @@ import pygame
 from .battery_reader import BatteryReader
 from .config_loader import load_config, get_profile, get_platform_config_path, USER_CONFIG_PATH
 from .gui import MainWindow
-from .joycon_reader import find_joycon, detect_connection_mode, run_discover_mode, run_polling_loop, wait_for_reconnection
+from .joycon_reader import (
+    find_joycon,
+    find_joycons,
+    detect_connection_mode,
+    run_discover_mode,
+    run_polling_loop,
+    wait_for_reconnection,
+)
 from .keep_alive import KeepAliveManager
 from .key_mapper import KeyMapper
-from .os_utils.permission import has_required_permissions, get_permission_warning
+from .os_utils.permission import (
+    has_required_permissions,
+    get_permission_warning,
+    request_macos_accessibility_prompt,
+    open_macos_privacy_pane,
+)
 from .tray_icon import create_tray_icon, run_tray
 
 logger = logging.getLogger(__name__)
@@ -199,9 +212,31 @@ def main() -> None:
         handlers=handlers,
     )
 
+    # Single-instance check — must come BEFORE pygame init / GUI creation,
+    # otherwise a duplicate launch will briefly grab the joystick / show a
+    # second menu-bar icon before exiting.
+    from .single_instance import acquire as _acquire_single_instance
+    if not _acquire_single_instance():
+        msg = "JoyHarness 已经在运行中。请检查菜单栏图标 (macOS) 或系统托盘 (Windows)。"
+        logger.warning("Another instance is already running; exiting.")
+        print(msg)
+        if sys.platform == "darwin":
+            try:
+                _show_already_running_dialog()
+            except Exception:
+                logger.exception("already-running dialog failed")
+        sys.exit(0)
+
     # Permission check
     if not args.no_admin_warn and not has_required_permissions():
         print(get_permission_warning())
+        if sys.platform == "darwin":
+            # Trigger the system Accessibility prompt (one-shot per install)
+            # so the user sees Apple's official "Open System Settings" sheet.
+            request_macos_accessibility_prompt()
+            # Also show our own dialog with detailed Chinese guidance,
+            # since the menu-bar app has no visible window otherwise.
+            _show_macos_permission_dialog()
 
     # Load config — prefer platform-specific user config if it exists
     config_path = args.config
@@ -238,20 +273,20 @@ def main() -> None:
     pygame.display.init()
     pygame.joystick.init()
 
-    js = find_joycon(args.joystick)
-    if js is None:
-        print("No Joy-Con detected. Waiting for connection...")
+    joycons = find_joycons()
+    if not joycons:
+        # Don't block here — start the UI immediately and let the polling
+        # thread wait for the controller in the background. Otherwise the
+        # menu-bar / window never appears and the app looks frozen.
+        print("No Joy-Con detected at startup; will keep scanning in background.")
         print(_get_pairing_instructions())
-        js = wait_for_reconnection(args.joystick)
-        if js is None:
-            pygame.quit()
-            sys.exit(1)
-
-    print(f"Controller: {js.get_name()}")
-    print(f"Buttons: {js.get_numbuttons()}, Axes: {js.get_numaxes()}")
+    else:
+        for side, j in joycons:
+            print(f"Controller [{side}]: {j.get_name()} "
+                  f"buttons={j.get_numbuttons()} axes={j.get_numaxes()}")
 
     # Detect connection mode and load the appropriate profile
-    connection_mode = detect_connection_mode()
+    connection_mode = detect_connection_mode() if joycons else "single_right"
     profile = get_profile(config, connection_mode)
     profile_mappings = profile.get("mappings", config.get("mappings", {}))
     config["mappings"] = profile_mappings
@@ -296,16 +331,14 @@ def main() -> None:
     # Start polling loop in background thread (after GUI so callback is available)
     poll_thread = threading.Thread(
         target=_run_polling,
-        args=(js, key_mapper, config, stop_event, gui.update_connection_mode),
+        args=(joycons, key_mapper, config, stop_event, gui.update_connection_mode),
         daemon=True,
     )
     poll_thread.start()
 
     # Start tray icon in background thread (Windows only)
-    # macOS: pystray requires NSApplication.run on the main thread, which
-    # conflicts with tkinter's mainloop. Since macOS has Dock + Cmd+Tab for
-    # app switching, the tray icon is not essential. Skipping it avoids a
-    # 99% CPU spin caused by NSApplication threading violations.
+    # macOS: pystray would conflict with Tk's runloop; we use NSStatusBar
+    # via PyObjC instead (see _setup_macos_menu_bar below).
     icon = None
     tray_thread = None
     if sys.platform != "darwin":
@@ -313,8 +346,12 @@ def main() -> None:
         tray_thread = threading.Thread(target=run_tray, args=(icon,), daemon=True)
         tray_thread.start()
 
+    status_bar = None
     if sys.platform == "darwin":
-        print("GUI active. Close window to quit.")
+        status_bar = _setup_macos_menu_bar(gui, battery_reader, stop_event)
+        # Launch hidden — user reopens via menu bar
+        gui.root.withdraw()
+        print("Menu-bar app active. Click the menu-bar icon to interact.")
     else:
         print("GUI and tray active. Close window or right-click tray to quit.")
 
@@ -335,17 +372,320 @@ def main() -> None:
 
 
 def _run_polling(
-    joystick,
+    joycons,
     key_mapper: KeyMapper,
     config: dict,
     stop_event: threading.Event,
     on_mode_change=None,
 ) -> None:
-    """Run polling loop in a background thread, handling exceptions."""
+    """Run polling loop in a background thread, handling exceptions.
+
+    Args:
+        joycons: list[(side, Joystick)] from find_joycons(). May be empty —
+            the thread will then poll find_joycons() until at least one
+            Joy-Con appears.
+    """
     try:
-        run_polling_loop(joystick, key_mapper, config, stop_event, on_mode_change=on_mode_change)
+        # If no controller was attached at launch, wait for one here
+        # (off the main thread, so the GUI / menu bar stays responsive).
+        if not joycons:
+            logger.info("Polling thread: waiting for Joy-Con to connect…")
+            while not stop_event.is_set():
+                joycons = find_joycons()
+                if joycons:
+                    logger.info("Polling thread: %d controller(s) connected", len(joycons))
+                    if on_mode_change is not None:
+                        try:
+                            on_mode_change(detect_connection_mode())
+                        except Exception:
+                            logger.exception("on_mode_change after first connect failed")
+                    break
+                time.sleep(2.0)
+            if stop_event.is_set():
+                return
+        run_polling_loop(joycons, key_mapper, config, stop_event, on_mode_change=on_mode_change)
     except Exception:
         logger.exception("Polling thread error")
+
+
+def _show_already_running_dialog() -> None:
+    """macOS-only: show a small Tk dialog telling the user another instance is running."""
+    import tkinter as tk
+    import ttkbootstrap as ttk
+
+    win = ttk.Window(themename="darkly")
+    win.title("JoyHarness")
+    win.resizable(False, False)
+    try:
+        win.attributes("-topmost", True)
+    except Exception:
+        pass
+
+    container = ttk.Frame(win, padding=24)
+    container.pack(fill="both", expand=True)
+
+    ttk.Label(
+        container, text="JoyHarness 已经在运行",
+        font=("Helvetica", 16, "bold"),
+    ).pack(anchor="w")
+
+    ttk.Label(
+        container,
+        text=(
+            "已有一个 JoyHarness 进程在后台运行。\n"
+            "请通过菜单栏图标 (顶部) 进行操作；\n"
+            "如需重新启动，请先在菜单栏中选择「退出」。"
+        ),
+        font=("Helvetica", 11),
+        justify="left",
+    ).pack(anchor="w", pady=(8, 16))
+
+    ttk.Button(
+        container, text="知道了",
+        bootstyle="primary",
+        command=win.destroy, width=14,
+    ).pack(anchor="e")
+
+    win.update_idletasks()
+    w = win.winfo_width()
+    h = win.winfo_height()
+    x = (win.winfo_screenwidth() - w) // 2
+    y = (win.winfo_screenheight() - h) // 2
+    win.geometry(f"+{x}+{y}")
+    win.lift()
+    win.focus_force()
+    win.mainloop()
+
+
+def _show_macos_permission_dialog() -> None:
+    """Show a startup dialog explaining required macOS permissions.
+
+    Displayed once at launch when permissions are missing. Offers buttons
+    that open the relevant System Settings panes directly.
+    """
+    import tkinter as tk
+    import ttkbootstrap as ttk
+
+    win = ttk.Window(themename="darkly")
+    win.title("JoyHarness 需要授权")
+    win.resizable(False, False)
+    # Bring this transient dialog to the front of all apps
+    try:
+        win.attributes("-topmost", True)
+    except Exception:
+        pass
+
+    container = ttk.Frame(win, padding=24)
+    container.pack(fill="both", expand=True)
+
+    ttk.Label(
+        container, text="首次运行需要授权",
+        font=("Helvetica", 16, "bold"),
+    ).pack(anchor="w")
+
+    ttk.Label(
+        container,
+        text=(
+            "JoyHarness 需要以下两项 macOS 权限才能正常工作：\n\n"
+            "  1.  辅助功能 — 用于模拟键盘按键\n"
+            "  2.  输入监控 — 用于触发系统语音输入 (ZR 键)\n\n"
+            "点击下方按钮直接打开对应的设置面板，把\n"
+            "JoyHarness 加入并勾选，然后退出再重新启动。"
+        ),
+        font=("Helvetica", 11),
+        justify="left",
+    ).pack(anchor="w", pady=(8, 16))
+
+    btn_row = ttk.Frame(container)
+    btn_row.pack(fill="x")
+
+    def open_acc():
+        open_macos_privacy_pane("Accessibility")
+
+    def open_input():
+        open_macos_privacy_pane("ListenEvent")
+
+    ttk.Button(
+        btn_row, text="打开「辅助功能」",
+        bootstyle="primary",
+        command=open_acc, width=18,
+    ).pack(side="left", padx=(0, 8))
+
+    ttk.Button(
+        btn_row, text="打开「输入监控」",
+        bootstyle="info",
+        command=open_input, width=18,
+    ).pack(side="left", padx=(0, 8))
+
+    ttk.Button(
+        btn_row, text="我已授权，继续",
+        bootstyle="secondary",
+        command=win.destroy, width=14,
+    ).pack(side="right")
+
+    # Center on screen
+    win.update_idletasks()
+    w = win.winfo_width()
+    h = win.winfo_height()
+    x = (win.winfo_screenwidth() - w) // 2
+    y = (win.winfo_screenheight() - h) // 2
+    win.geometry(f"+{x}+{y}")
+    win.lift()
+    win.focus_force()
+    win.mainloop()
+
+
+def _setup_macos_menu_bar(gui, battery_reader, stop_event):
+    """Create the NSStatusBar menu-bar item and wire its callbacks.
+
+    The icon updates from a periodic root.after() poll that reads
+    battery_reader's thread-safe state. All GUI mutations stay on the
+    Tk main thread, so we don't need extra locking.
+    """
+    from .macos_status_bar import MacStatusBar
+    from .constants import __version__
+
+    def show_window():
+        gui.show()
+
+    def open_settings():
+        gui.show()
+        # Reuse the existing settings opener on the main window
+        try:
+            gui._open_settings()
+        except Exception:
+            logger.exception("open settings from menu bar failed")
+
+    def show_about():
+        gui.show()
+        try:
+            _show_about_dialog(gui.root, __version__)
+        except Exception:
+            logger.exception("about dialog failed")
+
+    def quit_app():
+        logger.info("Quit requested from menu bar")
+        try:
+            from .config_loader import save_config
+            save_config(gui._config)
+        except Exception:
+            logger.exception("save_config on quit failed")
+        stop_event.set()
+        # Schedule destroy on main thread to break out of mainloop cleanly
+        gui.root.after(0, gui.root.destroy)
+
+    sb = MacStatusBar(
+        on_show_window=show_window,
+        on_open_settings=open_settings,
+        on_about=show_about,
+        on_quit=quit_app,
+    )
+
+    def refresh():
+        if stop_event.is_set():
+            return
+        try:
+            state = battery_reader.get_state()  # {"L": (status, pct), "R": (status, pct)}
+            connected = False
+            charging = False
+            low = False
+            parts = []
+            for side in ("R", "L"):
+                if side not in state:
+                    continue
+                status, pct = state[side]
+                if status == "unknown" or pct < 0:
+                    parts.append(f"{side}: 未知")
+                    continue
+                connected = True
+                if status == "charging":
+                    charging = True
+                    parts.append(f"{side}: {pct}% 充电中")
+                else:
+                    parts.append(f"{side}: {pct}%")
+                    if pct <= 25:
+                        low = True
+            if not parts:
+                parts = ["未连接"]
+            sb.set_state(connected=connected, charging=charging, low_battery=low)
+            sb.set_battery_text("电量  " + "   ".join(parts))
+        except Exception:
+            logger.exception("status bar refresh failed")
+        finally:
+            gui.root.after(2000, refresh)
+
+    gui.root.after(500, refresh)
+    return sb
+
+
+def _show_about_dialog(parent, version: str) -> None:
+    """A small custom 'About' dialog with the app icon and version."""
+    import tkinter as tk
+    import ttkbootstrap as ttk
+    from PIL import Image, ImageTk
+    from .gui import _icon_path
+
+    win = ttk.Toplevel(parent)
+    win.title("关于 JoyHarness")
+    win.resizable(False, False)
+    win.transient(parent)
+
+    container = ttk.Frame(win, padding=24)
+    container.pack(fill="both", expand=True)
+
+    # Icon
+    photo = None
+    icon_path = _icon_path("AppIcon-1024.png")
+    if icon_path is not None:
+        try:
+            img = Image.open(icon_path).convert("RGBA").resize((128, 128), Image.LANCZOS)
+            photo = ImageTk.PhotoImage(img, master=win)
+            ttk.Label(container, image=photo).pack(pady=(0, 12))
+        except Exception:
+            pass
+
+    ttk.Label(
+        container, text="JoyHarness",
+        font=("Helvetica", 22, "bold"),
+    ).pack()
+
+    ttk.Label(
+        container, text=f"版本 {version}",
+        font=("Helvetica", 12),
+    ).pack(pady=(2, 12))
+
+    ttk.Label(
+        container, text="Joy-Con 键盘映射 + 语音触发工具",
+        font=("Helvetica", 11),
+    ).pack()
+
+    ttk.Label(
+        container, text="macOS 菜单栏模式运行",
+        font=("Helvetica", 10),
+        bootstyle="secondary",
+    ).pack(pady=(2, 16))
+
+    ttk.Button(
+        container, text="确定",
+        bootstyle="primary",
+        command=win.destroy, width=12,
+    ).pack()
+
+    # Hold a reference so the image survives garbage collection
+    if photo is not None:
+        win._about_photo = photo  # type: ignore[attr-defined]
+
+    # Center on parent
+    win.update_idletasks()
+    pw = parent.winfo_width()
+    ph = parent.winfo_height()
+    px = parent.winfo_rootx()
+    py = parent.winfo_rooty()
+    ww = win.winfo_width()
+    wh = win.winfo_height()
+    win.geometry(f"+{px + (pw - ww) // 2}+{py + (ph - wh) // 2}")
+    win.lift()
+    win.focus_force()
 
 
 if __name__ == "__main__":

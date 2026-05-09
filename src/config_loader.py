@@ -123,11 +123,17 @@ def merge_with_defaults(user_config: dict) -> dict:
             user_profile = user_config["profiles"].get(mode, {})
             user_mappings = user_profile.get("mappings", {})
             if "buttons" in user_mappings:
-                result["profiles"][mode]["mappings"]["buttons"].update(user_mappings["buttons"])
+                buttons = user_mappings["buttons"]
+                if mode == "dual":
+                    buttons = _migrate_dual_buttons(buttons)
+                result["profiles"][mode]["mappings"]["buttons"].update(buttons)
             if "stick_directions" in user_mappings:
                 result["profiles"][mode]["mappings"]["stick_directions"].update(
                     user_mappings["stick_directions"]
                 )
+            # stick_source is dual-only and lives alongside buttons/stick_directions
+            if mode == "dual" and "stick_source" in user_mappings:
+                result["profiles"][mode]["mappings"]["stick_source"] = user_mappings["stick_source"]
 
         # Keep top-level mappings in sync with active_profile (for backward compat with code that reads config["mappings"])
         active_profile = user_config.get("active_profile", "single_right")
@@ -173,6 +179,41 @@ def get_profile(config: dict, mode: str) -> dict:
     """
     profiles = config.get("profiles", {})
     return profiles.get(mode, profiles.get("single_right", {}))
+
+
+# Older configs (and the legacy DEFAULT_MAPPINGS_DUAL) used bare A/B/X/Y in
+# the dual profile to mean "right Joy-Con A/B/X/Y". The new schema requires
+# explicit L_/R_ prefixes so both sides can be mapped independently. This
+# table renames legacy keys to their right-side equivalents on load.
+_DUAL_LEGACY_RENAME = {
+    "A": "R_A",
+    "B": "R_B",
+    "X": "R_X",
+    "Y": "R_Y",
+}
+
+
+def _migrate_dual_buttons(buttons: dict) -> dict:
+    """Rename legacy bare A/B/X/Y keys in a dual-profile buttons dict.
+
+    Returns a new dict so the caller's input isn't mutated. If a config
+    already specifies the new key (e.g. R_A), the new key wins and the
+    legacy one is dropped silently.
+    """
+    if not buttons:
+        return buttons
+    migrated: dict = {}
+    for name, mapping in buttons.items():
+        new_name = _DUAL_LEGACY_RENAME.get(name, name)
+        # Don't overwrite an explicit new key with a legacy fallback
+        if new_name != name and new_name in buttons:
+            logger.info("dual profile: dropping legacy '%s' (explicit '%s' present)",
+                        name, new_name)
+            continue
+        if new_name != name:
+            logger.info("dual profile: migrated '%s' → '%s'", name, new_name)
+        migrated[new_name] = mapping
+    return migrated
 
 
 def validate_config(config: dict) -> list[str]:
@@ -259,6 +300,32 @@ def _validate_mapping_entry(name: str, mapping: dict) -> list[str]:
             errors.append(f"'{name}' action '{action}' requires a 'key' string")
         elif not _is_valid_key(key):
             errors.append(f"'{name}' has invalid key name: '{key}'")
+
+    elif action == "auto":
+        # auto requires either `key` (single) or `short_keys` (combo) for the short press.
+        short_keys = mapping.get("short_keys")
+        key = mapping.get("key")
+        if short_keys is not None:
+            if not isinstance(short_keys, list) or len(short_keys) == 0:
+                errors.append(f"'{name}' auto short_keys must be a non-empty list")
+            else:
+                for k in short_keys:
+                    if not isinstance(k, str) or not _is_valid_key(k):
+                        errors.append(f"'{name}' invalid key in short_keys: '{k}'")
+        elif isinstance(key, str):
+            if not _is_valid_key(key):
+                errors.append(f"'{name}' has invalid key name: '{key}'")
+        else:
+            errors.append(f"'{name}' auto action requires 'key' or 'short_keys'")
+        # Validate optional long_keys
+        long_keys = mapping.get("long_keys")
+        if long_keys is not None:
+            if not isinstance(long_keys, list) or len(long_keys) == 0:
+                errors.append(f"'{name}' long_keys must be a non-empty list")
+            else:
+                for k in long_keys:
+                    if not isinstance(k, str) or not _is_valid_key(k):
+                        errors.append(f"'{name}' invalid key in long_keys: '{k}'")
 
     elif action in ("combination", "sequence"):
         keys = mapping.get("keys")

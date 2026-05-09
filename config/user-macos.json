@@ -15,6 +15,10 @@
       "B": {
         "action": "auto",
         "key": "backspace",
+        "long_keys": [
+          "cmd",
+          "backspace"
+        ],
         "repeat": 100
       },
       "X": {
@@ -28,32 +32,34 @@
           "tab"
         ]
       },
-      "R": {
-        "action": "exec",
-        "command": [
-          "open",
-          "-a",
-          "Mission Control"
-        ]
+      "L": {
+        "action": "window_switch"
       },
-      "ZR": {
+      "ZL": {
         "action": "hold",
         "key": "alt_r"
       },
-      "Plus": {
-        "action": "hold",
-        "key": "cmd_r"
-      },
-      "Home": {
+      "Minus": {
         "action": "combination",
         "keys": [
           "cmd",
-          "space"
+          "s"
         ]
       },
-      "RStick": {
-        "action": "tap",
-        "key": "tab"
+      "Capture": {
+        "action": "exec",
+        "command": [
+          "/bin/sh",
+          "-c",
+          "screencapture ~/Desktop/screenshot-$(date +%Y%m%d-%H%M%S).png"
+        ]
+      },
+      "LStick": {
+        "action": "combination",
+        "keys": [
+          "shift",
+          "tab"
+        ]
       },
       "SL": {
         "action": "hold",
@@ -66,22 +72,22 @@
     "stick_directions": {
       "up": {
         "action": "auto",
-        "key": "down",
+        "key": "up",
         "repeat": 100
       },
       "down": {
         "action": "auto",
-        "key": "up",
+        "key": "down",
         "repeat": 100
       },
       "left": {
         "action": "auto",
-        "key": "left",
+        "key": "right",
         "repeat": 100
       },
       "right": {
         "action": "auto",
-        "key": "right",
+        "key": "left",
         "repeat": 100
       }
     }
@@ -90,9 +96,19 @@
     "Ghostty": "Ghostty",
     "微信": "微信",
     "飞书": "飞书",
-    "反重力": "Antigravity"
+    "Claude": "Claude",
+    "反重力": "Antigravity",
+    "VSCode": "Code",
+    "Chrome": "Google Chrome"
   },
-  "selected_apps": [],
+  "selected_apps": [
+    "Ghostty",
+    "微信",
+    "飞书",
+    "Claude",
+    "Code",
+    "Google Chrome"
+  ],
   "profiles": {
     "single_right": {
       "mappings": {
@@ -104,6 +120,10 @@
           "B": {
             "action": "auto",
             "key": "backspace",
+            "long_keys": [
+              "cmd",
+              "backspace"
+            ],
             "repeat": 100
           },
           "X": {
@@ -118,12 +138,7 @@
             ]
           },
           "R": {
-            "action": "exec",
-            "command": [
-              "open",
-              "-a",
-              "Mission Control"
-            ]
+            "action": "window_switch"
           },
           "ZR": {
             "action": "hold",
@@ -141,8 +156,11 @@
             ]
           },
           "RStick": {
-            "action": "tap",
-            "key": "tab"
+            "action": "combination",
+            "keys": [
+              "shift",
+              "tab"
+            ]
           },
           "SL": {
             "action": "hold",
@@ -184,84 +202,12 @@
             "key": "enter"
           },
           "B": {
-            "action": "tap",
-            "key": "escape"
-          },
-          "X": {
-            "action": "tap",
-            "key": "backspace"
-          },
-          "Y": {
-            "action": "combination",
-            "keys": [
-              "cmd",
-              "tab"
-            ]
-          },
-          "L": {
-            "action": "window_switch"
-          },
-          "ZL": {
-            "action": "hold",
-            "key": "cmd"
-          },
-          "Minus": {
-            "action": "combination",
-            "keys": [
-              "cmd",
-              "s"
-            ]
-          },
-          "Capture": {
-            "action": "combination",
-            "keys": [
-              "cmd",
-              "shift",
-              "3"
-            ]
-          },
-          "LStick": {
-            "action": "tap",
-            "key": "tab"
-          },
-          "SL": {
-            "action": "hold",
-            "key": "shift"
-          },
-          "SR": {
-            "action": "window_switch"
-          }
-        },
-        "stick_directions": {
-          "up": {
-            "action": "tap",
-            "key": "up"
-          },
-          "down": {
-            "action": "tap",
-            "key": "down"
-          },
-          "left": {
-            "action": "tap",
-            "key": "left"
-          },
-          "right": {
-            "action": "tap",
-            "key": "right"
-          }
-        }
-      }
-    },
-    "dual": {
-      "mappings": {
-        "buttons": {
-          "A": {
-            "action": "tap",
-            "key": "enter"
-          },
-          "B": {
             "action": "auto",
             "key": "backspace",
+            "long_keys": [
+              "cmd",
+              "backspace"
+            ],
             "repeat": 100
           },
           "X": {
@@ -275,13 +221,120 @@
               "tab"
             ]
           },
-          "R": {
+          "L": {
+            "action": "window_switch"
+          },
+          "ZL": {
+            "action": "hold",
+            "key": "alt_r"
+          },
+          "Minus": {
+            "action": "combination",
+            "keys": [
+              "cmd",
+              "s"
+            ]
+          },
+          "Capture": {
             "action": "exec",
             "command": [
-              "open",
-              "-a",
-              "Mission Control"
+              "/bin/sh",
+              "-c",
+              "screencapture ~/Desktop/screenshot-$(date +%Y%m%d-%H%M%S).png"
             ]
+          },
+          "LStick": {
+            "action": "combination",
+            "keys": [
+              "shift",
+              "tab"
+            ]
+          },
+          "SL": {
+            "action": "hold",
+            "key": "cmd"
+          },
+          "SR": {
+            "action": "window_switch"
+          }
+        },
+        "stick_directions": {
+          "up": {
+            "action": "auto",
+            "key": "up",
+            "repeat": 100
+          },
+          "down": {
+            "action": "auto",
+            "key": "down",
+            "repeat": 100
+          },
+          "left": {
+            "action": "auto",
+            "key": "right",
+            "repeat": 100
+          },
+          "right": {
+            "action": "auto",
+            "key": "left",
+            "repeat": 100
+          }
+        }
+      }
+    },
+    "dual": {
+      "mappings": {
+        "buttons": {
+          "L_A": {
+            "action": "tap",
+            "key": "enter"
+          },
+          "L_B": {
+            "action": "auto",
+            "key": "backspace",
+            "long_keys": [
+              "cmd",
+              "backspace"
+            ],
+            "repeat": 100
+          },
+          "L_X": {
+            "action": "tap",
+            "key": "escape"
+          },
+          "L_Y": {
+            "action": "combination",
+            "keys": [
+              "cmd",
+              "tab"
+            ]
+          },
+          "R_A": {
+            "action": "tap",
+            "key": "enter"
+          },
+          "R_B": {
+            "action": "auto",
+            "key": "backspace",
+            "long_keys": [
+              "cmd",
+              "backspace"
+            ],
+            "repeat": 100
+          },
+          "R_X": {
+            "action": "tap",
+            "key": "escape"
+          },
+          "R_Y": {
+            "action": "combination",
+            "keys": [
+              "cmd",
+              "tab"
+            ]
+          },
+          "R": {
+            "action": "window_switch"
           },
           "ZR": {
             "action": "hold",
@@ -311,11 +364,11 @@
             ]
           },
           "Capture": {
-            "action": "combination",
-            "keys": [
-              "cmd",
-              "shift",
-              "3"
+            "action": "exec",
+            "command": [
+              "/bin/sh",
+              "-c",
+              "screencapture ~/Desktop/screenshot-$(date +%Y%m%d-%H%M%S).png"
             ]
           },
           "RStick": {
@@ -358,9 +411,10 @@
             "action": "tap",
             "key": "right"
           }
-        }
+        },
+        "stick_source": "right"
       }
     }
   },
-  "active_profile": "single_right"
+  "active_profile": "single_left"
 }

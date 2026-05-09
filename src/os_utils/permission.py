@@ -46,6 +46,42 @@ def _check_windows_admin() -> bool:
         return False
 
 
+def request_macos_accessibility_prompt() -> bool:
+    """Trigger the system Accessibility prompt (with the “Open System Settings”
+    button) by calling AXIsProcessTrustedWithOptions with prompt=True.
+
+    Returns the current trust state. The first call after a fresh install
+    surfaces the system dialog; subsequent calls just return the state.
+    """
+    if sys.platform != "darwin":
+        return True
+    try:
+        from ApplicationServices import AXIsProcessTrustedWithOptions  # type: ignore
+        from CoreFoundation import CFDictionaryCreate, kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks  # type: ignore
+        # kAXTrustedCheckOptionPrompt = "AXTrustedCheckOptionPrompt"
+        key = "AXTrustedCheckOptionPrompt"
+        opts = {key: True}
+        return bool(AXIsProcessTrustedWithOptions(opts))
+    except Exception:
+        logger.debug("Accessibility prompt failed", exc_info=True)
+        return False
+
+
+def open_macos_privacy_pane(pane: str = "Accessibility") -> None:
+    """Open a specific Privacy pane in System Settings.
+
+    pane: 'Accessibility' | 'ListenEvent' | 'Microphone'
+    """
+    if sys.platform != "darwin":
+        return
+    import subprocess
+    url = f"x-apple.systempreferences:com.apple.preference.security?Privacy_{pane}"
+    try:
+        subprocess.Popen(["open", url])
+    except Exception:
+        logger.exception("Failed to open privacy pane %s", pane)
+
+
 def _check_macos_accessibility() -> bool:
     """Check macOS Accessibility permission without injecting any keystroke.
 
