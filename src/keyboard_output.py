@@ -143,6 +143,17 @@ if sys.platform == "darwin":
             return None
         return None
 
+    _MODIFIER_KEY_NAMES = {
+        "ctrl", "control", "ctrl_l", "ctrl_r",
+        "alt", "option", "alt_l", "alt_r",
+        "cmd", "command", "cmd_l", "cmd_r",
+        "shift", "shift_l", "shift_r",
+        "fn",
+    }
+
+    def _is_modifier_key(key_name: str) -> bool:
+        return key_name.lower() in _MODIFIER_KEY_NAMES
+
     def _safe_pynput(key_obj, key_name: str, is_down: bool) -> None:
         """Send a key via pynput, but refuse if it would resolve to vk=0
         for anything that isn't actually the letter 'a' — pynput on macOS
@@ -188,6 +199,15 @@ if sys.platform == "darwin":
                 if vk_int == 0 and str(key_obj).replace("'", "") != "a":
                     raise ValueError(f"Refusing to send vk 0 (a) for non-'a' key: {key_name} -> {key_obj}")
                 event = Quartz.CGEventCreateKeyboardEvent(None, vk_int, is_down)
+                # Force-clear the global modifier flag state on every standalone key event.
+                # Without this, a previously synthesized modifier (e.g. alt_r down/up for ZR
+                # hold) leaves the process-wide CGEvent flag bit set, and later "bare" keys
+                # like Enter arrive at strict consumers (Ghostty / Claude Code TUI) as
+                # Option+Enter — which TUIs interpret as "insert newline", not "submit".
+                # Combination chords go through _do_send_combination_macos and set their
+                # own flags explicitly, so this clear is safe for them too (they overwrite).
+                if not _is_modifier_key(key_name):
+                    Quartz.CGEventSetFlags(event, 0)
                 Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
                 logger.debug("CGEvent posted: '%s' vk=%d %s", key_name, vk_int, "down" if is_down else "up")
             except (ValueError, TypeError) as e:
