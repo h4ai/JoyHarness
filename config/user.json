@@ -15,15 +15,19 @@
       "B": {
         "action": "auto",
         "key": "backspace",
+        "repeat": 100,
         "long_keys": [
           "cmd",
           "backspace"
-        ],
-        "repeat": 100
+        ]
       },
       "X": {
-        "action": "tap",
-        "key": "escape"
+        "action": "auto",
+        "key": "escape",
+        "long_keys": [
+          "ctrl",
+          "space"
+        ]
       },
       "Y": {
         "action": "combination",
@@ -36,8 +40,11 @@
         "action": "window_switch"
       },
       "ZL": {
-        "action": "hold",
-        "key": "alt_r"
+        "action": "auto",
+        "key": "alt_r",
+        "long_keys": [
+          "alt_r"
+        ]
       },
       "Minus": {
         "action": "combination",
@@ -204,15 +211,19 @@
           "B": {
             "action": "auto",
             "key": "backspace",
+            "repeat": 100,
             "long_keys": [
               "cmd",
               "backspace"
-            ],
-            "repeat": 100
+            ]
           },
           "X": {
-            "action": "tap",
-            "key": "escape"
+            "action": "auto",
+            "key": "escape",
+            "long_keys": [
+              "ctrl",
+              "space"
+            ]
           },
           "Y": {
             "action": "combination",
@@ -225,8 +236,11 @@
             "action": "window_switch"
           },
           "ZL": {
-            "action": "hold",
-            "key": "alt_r"
+            "action": "auto",
+            "key": "alt_r",
+            "long_keys": [
+              "alt_r"
+            ]
           },
           "Minus": {
             "action": "combination",
@@ -285,11 +299,34 @@
     "dual": {
       "mappings": {
         "buttons": {
-          "A": {
+          "L_A": {
             "action": "tap",
             "key": "enter"
           },
-          "B": {
+          "L_B": {
+            "action": "sequence",
+            "keys": [
+              "shift",
+              "tab"
+            ]
+          },
+          "L_X": {
+            "action": "auto",
+            "key": "f2"
+          },
+          "L_Y": {
+            "action": "sequence",
+            "keys": [
+              "alt",
+              "tab"
+            ],
+            "repeat": 500
+          },
+          "R_A": {
+            "action": "tap",
+            "key": "enter"
+          },
+          "R_B": {
             "action": "auto",
             "key": "backspace",
             "long_keys": [
@@ -298,11 +335,11 @@
             ],
             "repeat": 100
           },
-          "X": {
+          "R_X": {
             "action": "tap",
             "key": "escape"
           },
-          "Y": {
+          "R_Y": {
             "action": "combination",
             "keys": [
               "cmd",
@@ -387,7 +424,8 @@
             "action": "tap",
             "key": "right"
           }
-        }
+        },
+        "stick_source": "right"
       }
     }
   },
